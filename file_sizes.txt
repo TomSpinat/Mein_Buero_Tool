@@ -1,0 +1,17 @@
+80511 .\backups\2026-03-11_einkauf_ui_unify\modul_mail_scraper.py
+38361 .\backups\2026-03-11_einkauf_ui_unify\modul_order_entry.py
+77762 .\backups\2026-03-11_mail_wizard_layout_fix\modul_mail_scraper.py
+6755 .\module\gemini_api.py
+506204 .\module\modul_mail_scraper.py
+38361 .\module\modul_order_entry.py
+80511 .\_backup_einkauf_ui_20260311_005129\modul_mail_scraper.py
+38361 .\_backup_einkauf_ui_20260311_005129\modul_order_entry.py
+58211 .\_backup_encoding_fix_20260310_182630\module\modul_mail_scraper.py
+37558 .\_backup_encoding_fix_20260310_182630\module\modul_order_entry.py
+7216 .\_backup_error_handling_20260310_135225\module\gemini_api.py
+55779 .\_backup_error_handling_20260310_135225\module\modul_mail_scraper.py
+36153 .\_backup_error_handling_20260310_135225\module\modul_order_entry.py
+59539 .\_backup_mail_pdf_preview_20260310_214900\modul_mail_scraper.py
+73990 .\_backup_mapping_embed_20260311_001109\modul_mail_scraper.py
+58176 .\_backup_scan_input_refactor_20260310_210945\module\modul_mail_scraper.py
+37453 .\_backup_scan_input_refactor_20260310_210945\module\modul_order_entry.py

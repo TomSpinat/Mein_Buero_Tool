@@ -1,0 +1,17 @@
+Wed Mar 11 00:35:45 2026 | 80511 bytes | .\backups\2026-03-11_einkauf_ui_unify\modul_mail_scraper.py
+Tue Mar 10 21:21:31 2026 | 38361 bytes | .\backups\2026-03-11_einkauf_ui_unify\modul_order_entry.py
+Wed Mar 11 09:12:04 2026 | 77762 bytes | .\backups\2026-03-11_mail_wizard_layout_fix\modul_mail_scraper.py
+Thu Mar 12 12:42:38 2026 | 6755 bytes | .\module\gemini_api.py
+Thu Mar 12 13:52:06 2026 | 506204 bytes | .\module\modul_mail_scraper.py
+Tue Mar 10 21:21:31 2026 | 38361 bytes | .\module\modul_order_entry.py
+Wed Mar 11 00:35:45 2026 | 80511 bytes | .\_backup_einkauf_ui_20260311_005129\modul_mail_scraper.py
+Tue Mar 10 21:21:31 2026 | 38361 bytes | .\_backup_einkauf_ui_20260311_005129\modul_order_entry.py
+Tue Mar 10 14:17:25 2026 | 58211 bytes | .\_backup_encoding_fix_20260310_182630\module\modul_mail_scraper.py
+Tue Mar 10 14:15:46 2026 | 37558 bytes | .\_backup_encoding_fix_20260310_182630\module\modul_order_entry.py
+Mon Mar  9 13:03:55 2026 | 7216 bytes | .\_backup_error_handling_20260310_135225\module\gemini_api.py
+Tue Mar 10 11:51:41 2026 | 55779 bytes | .\_backup_error_handling_20260310_135225\module\modul_mail_scraper.py
+Tue Mar 10 12:03:53 2026 | 36153 bytes | .\_backup_error_handling_20260310_135225\module\modul_order_entry.py
+Tue Mar 10 21:24:13 2026 | 59539 bytes | .\_backup_mail_pdf_preview_20260310_214900\modul_mail_scraper.py
+Tue Mar 10 23:54:03 2026 | 73990 bytes | .\_backup_mapping_embed_20260311_001109\modul_mail_scraper.py
+Tue Mar 10 18:33:15 2026 | 58176 bytes | .\_backup_scan_input_refactor_20260310_210945\module\modul_mail_scraper.py
+Tue Mar 10 18:33:15 2026 | 37453 bytes | .\_backup_scan_input_refactor_20260310_210945\module\modul_order_entry.py

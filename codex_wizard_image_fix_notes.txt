@@ -1,0 +1,25 @@
+﻿Wizard-Bildpflege: geplanter Wiedereinstieg
+
+Blocker:
+- Der Ordner module\ ist im aktuellen Lauf nicht beschreibbar.
+- Root-Dateien im Projekt lassen sich anlegen, Dateien in module\ jedoch nicht.
+- Der eingebaute apply_patch-Helfer verifiziert in diesem Lauf nicht sauber gegen CRLF-Dateien.
+
+Geplante Codeaenderungen:
+1. module\einkauf_pipeline.py
+- confirm_and_save_single soll save_info und einkauf_id zurueckgeben.
+
+2. module\modul_order_entry.py
+- Beim Laden set_items(..., payload=self.current_gemini_data) nutzen.
+- Nach confirm_and_save_single die gemerkten Bildentscheidungen mit
+  einkauf_items_widget.apply_saved_image_decisions(save_result.get("db"), save_result.get("einkauf_id")) anwenden.
+
+3. module\modul_mail_scraper.py
+- _populate_items_table um payload erweitern.
+- _apply_payload_to_current_mail soll payload an set_items weiterreichen.
+- Nach confirm_and_save_single die gemerkten Bildentscheidungen mit
+  einkauf_items_widget.apply_saved_image_decisions(self._shared_db, save_result.get("einkauf_id")) anwenden.
+
+4. module\einkauf_ui.py
+- In _on_table_item_changed und _on_detail_field_decision nach Wertaenderungen payload['waren'] aktualisieren.
+- Wenn die Detailzeile offen ist, die Tabelle neu aufbauen, damit Bildkandidaten sofort nachgezogen werden.

@@ -1,0 +1,58 @@
+{
+    "db_host": "127.0.0.1",
+    "db_port": "3306",
+    "db_user": "root",
+    "db_name": "buchhaltung",
+    "imap_host": "imap.ionos.de",
+    "imap_user": "",
+    "imap_server": "imap.ionos.de",
+    "imap_port": "993",
+    "email_user": "kontakt@spirgath.de",
+    "mail_accounts": [
+        {
+            "name": "Standard Account",
+            "host": "imap.ionos.de",
+            "port": "993",
+            "user": "kontakt@spirgath.de",
+            "last_mail_uid": 181,
+            "secret_ref": "c98f69d097814f68a519081fcf386c91"
+        }
+    ],
+    "ean_api_enabled": true,
+    "upcitemdb_api_url": "https://api.upcitemdb.com/prod/trial/search",
+    "upcitemdb_timeout_sec": 8,
+    "upcitemdb_max_queries": 5,
+    "upcitemdb_min_score": 0.16,
+    "product_image_search_enabled": true,
+    "product_image_search_provider": "brave",
+    "product_image_search_api_url": "https://api.search.brave.com/res/v1/images/search",
+    "product_image_search_timeout_sec": 8,
+    "product_image_search_max_results": 3,
+    "shop_logo_search_enabled": true,
+    "shop_logo_search_provider": "brave",
+    "shop_logo_search_api_url": "https://api.search.brave.com/res/v1/images/search",
+    "shop_logo_search_timeout_sec": 8,
+    "shop_logo_search_max_results": 3,
+    "trusted_mail_senders": [
+        "confirmation-commande@amazon.fr",
+        "noreply@news.paypal.com",
+        "business@notebooksbilliger.de",
+        "service@info.nbb.com",
+        "versandbestaetigung@amazon.de",
+        "shipment-tracking@amazon.fr",
+        "noreply_shop@fritz.com",
+        "service@notebooksbilliger.de",
+        "timthebest@hotmail.de"
+    ],
+    "trusted_mail_domains": [
+        "news.paypal.com",
+        "notebooksbilliger.de",
+        "fritz.com",
+        "info.nbb.com",
+        "amazon.de",
+        "revolut.com",
+        "amazon.it"
+    ],
+    "test_wipe_on_start": true,
+    "test_last_wipe_at": "2026-03-14 19:57:56"
+}

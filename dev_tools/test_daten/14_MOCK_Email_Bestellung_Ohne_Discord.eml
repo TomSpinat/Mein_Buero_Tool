@@ -1,0 +1,22 @@
+From: noreply@nordbuy.example
+To: you@example.com
+Subject: Order confirmation NB-2026-1042
+Date: Sun, 08 Mar 2026 21:32:51 -0000
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="boundary123"
+
+--boundary123
+Content-Type: text/plain; charset="utf-8"
+
+Order number NB-2026-1042
+2x Logitech G Pro X Superlight 2
+1x Razer Viper V3 Pro
+Tracking: UPS-1Z88A91E6600001234
+
+
+--boundary123
+Content-Type: text/html; charset="utf-8"
+
+<html><body><h2>Order confirmation</h2><p>Order number: <b>NB-2026-1042</b></p><p>Items: 2x Logitech G Pro X Superlight 2, 1x Razer Viper V3 Pro</p><p>Tracking code: UPS-1Z88A91E6600001234</p></body></html>
+
+--boundary123--

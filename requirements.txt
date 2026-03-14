@@ -1,0 +1,6 @@
+PyQt6
+PyQt6-WebEngine
+openpyxl
+google-generativeai
+mysql-connector-python
+Pillow

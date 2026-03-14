@@ -1,0 +1,26 @@
+﻿# Python cache / bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual envs (local)
+.venv/
+venv/
+
+# Local backup and temp artifacts
+*.bak
+*.bak_*
+*.tmp
+*.temp
+
+# Runtime logs / generated diagnostics
+*.log
+data/crash_logs/
+
+# Local cleanup and refactor safety backups
+_backup_cleanup_legacy*/
+refactor_backups/
+
+# OS junk
+.DS_Store
+Thumbs.db

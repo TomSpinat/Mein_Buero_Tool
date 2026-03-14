@@ -1,0 +1,22 @@
+From: orders@future-deals.example
+To: you@example.com
+Subject: Bestellbestaetigung FD-2026-PS5-441
+Date: Sun, 08 Mar 2026 21:32:51 -0000
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="boundary123"
+
+--boundary123
+Content-Type: text/plain; charset="utf-8"
+
+Danke fuer Ihre Bestellung FD-2026-PS5-441.
+Artikel: 3x Sony PlayStation 5 Pro
+Tracking: DHL-4482810032
+Gesamt: 2.437,20 EUR
+
+
+--boundary123
+Content-Type: text/html; charset="utf-8"
+
+<html><body><h2>Bestellbestaetigung</h2><p>Bestellnummer: <b>FD-2026-PS5-441</b></p><p>Artikel: 3x Sony PlayStation 5 Pro</p><p>Tracking: DHL-4482810032</p><p>Gesamt brutto: 2.437,20 EUR</p></body></html>
+
+--boundary123--
