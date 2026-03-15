@@ -1,4 +1,4 @@
-﻿"""
+"""
 settings_dialog.py
 Fenster fuer die allgemeinen Einstellungen.
 Normale Werte liegen in settings.json, geheime Werte im Windows-Anmeldespeicher.
@@ -104,6 +104,10 @@ class SettingsDialog(QDialog):
         self.btn_clear_product_image_api_key.clicked.connect(self._delete_product_image_api_key)
         self.lbl_product_image_api_secret_state = QLabel()
 
+        self.lbl_product_image_search_google_cx = QLabel("Google Custom Search CX:")
+        self.entry_product_image_search_google_cx = QLineEdit()
+        self.entry_product_image_search_google_cx.setPlaceholderText("Suchmaschinen-ID (CX) fuer Custom Search")
+
         self.lbl_db_host = QLabel("MySQL Host:")
         self.entry_db_host = QLineEdit()
         self.entry_db_host.setPlaceholderText("z.B. 127.0.0.1")
@@ -166,6 +170,9 @@ class SettingsDialog(QDialog):
         image_api_row.addWidget(self.btn_clear_product_image_api_key)
         main_layout.addLayout(image_api_row)
         main_layout.addWidget(self.lbl_product_image_api_secret_state)
+        
+        main_layout.addWidget(self.lbl_product_image_search_google_cx)
+        main_layout.addWidget(self.entry_product_image_search_google_cx)
 
         main_layout.addSpacing(10)
 
@@ -258,6 +265,8 @@ class SettingsDialog(QDialog):
         self.entry_db_port.setText(self.settings_manager.get("db_port", "3306"))
         self.entry_db_user.setText(self.settings_manager.get("db_user", "root"))
         self.entry_db_name.setText(self.settings_manager.get("db_name", "buchhaltung"))
+        
+        self.entry_product_image_search_google_cx.setText(self.settings_manager.get("product_image_search_google_cx", ""))
         self._refresh_secret_states()
 
     def _delete_api_key(self):
@@ -388,6 +397,8 @@ class SettingsDialog(QDialog):
             "db_port": self.entry_db_port.text().strip() or "3306",
             "db_user": self.entry_db_user.text().strip(),
             "db_name": self.entry_db_name.text().strip(),
+            "product_image_search_google_cx": self.entry_product_image_search_google_cx.text().strip(),
+            "shop_logo_search_google_cx": self.entry_product_image_search_google_cx.text().strip() # Shared CX
         }
 
         api_key = self.entry_api_key.text().strip()

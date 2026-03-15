@@ -16,6 +16,13 @@ venv/
 # Runtime logs / generated diagnostics
 *.log
 data/crash_logs/
+data/debug_logs/
+
+# Laufzeitdaten / heruntergeladene Medien
+data/media/products/
+
+# Claude Code Memory (lokale Notizen)
+.claude/
 
 # Local cleanup and refactor safety backups
 _backup_cleanup_legacy*/

@@ -27,6 +27,10 @@ from module.einkauf_pipeline import EinkaufPipeline
 from module.ean_service import EanService
 from module.ean_lookup_dialog import EanLookupDialog
 from module.ean_search_worker import EanLookupWorker
+from module.shop_logo_search_service import ShopLogoSearchService
+from module.product_image_search_service import ProductImageSearchService
+from module.media.media_grid_selection_dialog import MediaGridSelectionDialog
+from module.media.media_keys import build_shop_key, build_product_key
 
 from module.crash_logger import (
     AppError,
@@ -45,11 +49,14 @@ class GeminiWorker(QThread):
 
     def run(self):
         try:
+            scan_decision_dict = self.prepared_scan.scan_decision.to_dict() if getattr(self.prepared_scan, "scan_decision", None) else None
             result = process_receipt_with_gemini(
                 api_key=self.api_key,
                 image_path=self.prepared_scan.gemini_image_path,
                 custom_text=self.prepared_scan.gemini_custom_text,
                 scan_mode=self.prepared_scan.scan_mode,
+                prompt_plan=self.prepared_scan.prompt_plan,
+                scan_decision=scan_decision_dict,
             )
             self.finished_signal.emit(result or {})
         except Exception as e:
@@ -158,6 +165,9 @@ class OrderEntryApp(QWidget):
         self.scan_mode = "einkauf" # 'einkauf' oder 'verkauf'
         self.selected_document_path = None  # Optional: manuell geladene Datei (z.B. PDF)
         self.scan_temp_file_path = None    # Temp-Datei fuer KI-Upload
+        
+        self.logo_search_service = ShopLogoSearchService(self.settings_manager)
+        self.image_search_service = ProductImageSearchService(self.settings_manager)
         
         self.main_layout = QVBoxLayout(self)
         self.tabs = QTabWidget()
@@ -274,7 +284,7 @@ class OrderEntryApp(QWidget):
         right_layout.addWidget(lbl_waren)
         
         self.table_waren = QTableWidget()
-        self.table_waren.setColumnCount(5)
+        self.table_waren.setColumnCount(6) # +1 für Bild-Suche Button
         # Erlaube dem Nutzer die Spaltenbreite manuell anzupassen
         self.table_waren.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.table_waren.horizontalHeader().setStretchLastSection(True) # Die letzte Spalte füllt den Rest auf
