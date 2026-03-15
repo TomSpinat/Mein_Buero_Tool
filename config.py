@@ -1,4 +1,4 @@
-﻿"""
+"""
 config.py
 Hilfsfunktionen fuer Ressourcenpfade und einfache Einstellungen.
 """
@@ -78,16 +78,18 @@ class SettingsManager:
             "upcitemdb_min_score": 0.16,
             "upcitemdb_api_key": "",
             "product_image_search_enabled": True,
-            "product_image_search_provider": "brave",
+            "product_image_search_provider": "google",
             "product_image_search_api_url": "https://api.search.brave.com/res/v1/images/search",
             "product_image_search_api_key": "",
+            "product_image_search_google_cx": "",
             "product_image_search_timeout_sec": 8,
-            "product_image_search_max_results": 3,
+            "product_image_search_max_results": 6,
             "shop_logo_search_enabled": True,
-            "shop_logo_search_provider": "brave",
+            "shop_logo_search_provider": "google",
             "shop_logo_search_api_url": "https://api.search.brave.com/res/v1/images/search",
+            "shop_logo_search_google_cx": "",
             "shop_logo_search_timeout_sec": 8,
-            "shop_logo_search_max_results": 3,
+            "shop_logo_search_max_results": 6,
             "trusted_mail_senders": [],
             "trusted_mail_domains": [],
             "test_wipe_on_start": False,

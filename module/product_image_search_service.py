@@ -1,4 +1,4 @@
-﻿import json
+import json
 import logging
 import ssl
 import urllib.error
@@ -28,27 +28,30 @@ class ProductImageSearchService:
         self.provider = str(settings_manager.get('product_image_search_provider', 'brave') or 'brave').strip().lower()
         self.api_url = str(settings_manager.get('product_image_search_api_url', '') or '').strip()
         self.api_key = str(settings_manager.get('product_image_search_api_key', '') or '').strip()
+        self.cx = str(settings_manager.get('product_image_search_cx', '') or '').strip()
         self.enabled = bool(settings_manager.get('product_image_search_enabled', True))
         self.timeout_sec = max(3, int(settings_manager.get('product_image_search_timeout_sec', 8) or 8))
-        self.max_results = max(1, min(3, int(settings_manager.get('product_image_search_max_results', 3) or 3)))
-        self.raw_provider_limit = max(self.max_results * 3, 6)
+        self.max_results = max(1, min(6, int(settings_manager.get('product_image_search_max_results', 6) or 6)))
+        self.raw_provider_limit = max(self.max_results * 3, 10)
 
     def search_candidates(self, produkt_name, varianten_info='', ean='', limit=None, context=None):
         produkt_name = str(produkt_name or '').strip()
         varianten_info = str(varianten_info or '').strip()
         ean = str(ean or '').strip()
         context = dict(context or {}) if isinstance(context, dict) else {}
-        output_limit = max(1, min(3, int(limit or self.max_results or 3)))
+        output_limit = max(1, min(6, int(limit or self.max_results or 6)))
         if not produkt_name:
             raise ProductImageSearchError('Fuer die Bildsuche fehlt der Produktname.')
         if not self.enabled:
             raise ProductImageSearchError('Die Web-Bildsuche ist in den Einstellungen deaktiviert.')
-        if self.provider != 'brave':
+        if self.provider not in ('brave', 'google'):
             raise ProductImageSearchError(f"Der konfigurierte Bildsuch-Provider '{self.provider}' wird aktuell noch nicht unterstuetzt.")
-        if not self.api_url:
-            raise ProductImageSearchError('Die Bildsuch-API-URL fehlt in den Einstellungen.')
+        if self.provider == 'brave' and not self.api_url:
+            raise ProductImageSearchError('Die Bildsuch-API-URL fehlt in den Einstellungen (für Brave).')
         if not self.api_key:
             raise ProductImageSearchError('Fuer die Bildsuche fehlt noch der API-Key in den Einstellungen.')
+        if self.provider == 'google' and not self.cx:
+            raise ProductImageSearchError('Fuer die Google Bildsuche fehlt die existierende Suchmaschinen-ID (CX).')
 
         normalized = self.normalizer.normalize_for_upcitemdb(produkt_name, varianten_info)
         query_plan = self._build_query_plan(normalized)
@@ -156,6 +159,32 @@ class ProductImageSearchService:
         return ' '.join(ordered).strip()
 
     def _fetch_provider_results(self, query_text):
+        if self.provider == 'google':
+            return self._fetch_google_results(query_text)
+        return self._fetch_brave_results(query_text)
+
+    def _fetch_google_results(self, query_text):
+        encoded_query = urllib.parse.urlencode({
+            'q': query_text,
+            'key': self.api_key,
+            'cx': self.cx,
+            'searchType': 'image',
+            'num': min(10, self.raw_provider_limit),
+            'safe': 'active',
+        })
+        base_url = 'https://customsearch.googleapis.com/customsearch/v1'
+        request_url = f"{base_url}?{encoded_query}"
+        logging.info('product_image_search_api_request: provider=google, url=hidden')
+        request = urllib.request.Request(
+            request_url,
+            headers={
+                'Accept': 'application/json',
+                'User-Agent': 'MeinBueroTool/1.0',
+            },
+        )
+        return self._execute_request(request, query_text, 'google')
+
+    def _fetch_brave_results(self, query_text):
         encoded_query = urllib.parse.urlencode({
             'q': query_text,
             'count': self.raw_provider_limit,
@@ -164,7 +193,7 @@ class ProductImageSearchService:
             'safesearch': 'moderate',
         })
         request_url = f"{self.api_url}?{encoded_query}"
-        logging.info('product_image_search_api_request: provider=%s, url=%s', self.provider, request_url)
+        logging.info('product_image_search_api_request: provider=brave, url=%s', request_url)
         request = urllib.request.Request(
             request_url,
             headers={
@@ -173,6 +202,9 @@ class ProductImageSearchService:
                 'X-Subscription-Token': self.api_key,
             },
         )
+        return self._execute_request(request, query_text, 'brave')
+
+    def _execute_request(self, request, query_text, provider):
         try:
             context = ssl.create_default_context()
             with urllib.request.urlopen(request, timeout=self.timeout_sec, context=context) as response:
@@ -212,13 +244,13 @@ class ProductImageSearchService:
     def _extract_provider_results(self, payload):
         if not isinstance(payload, dict):
             return []
-        for key in ('results', 'images', 'items'):
-            rows = payload.get(key)
-            if isinstance(rows, list):
-                return rows
+            for key in ('items', 'results', 'images'):
+                rows = payload.get(key)
+                if isinstance(rows, list):
+                    return rows
         data = payload.get('data')
         if isinstance(data, dict):
-            for key in ('results', 'images', 'items'):
+            for key in ('items', 'results', 'images'):
                 rows = data.get(key)
                 if isinstance(rows, list):
                     return rows

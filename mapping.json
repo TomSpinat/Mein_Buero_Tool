@@ -1,8 +1,6 @@
 {
-    "shops": {
-        "notebooksbilliger.de": "notebooksbilliger.de"
-    },
+    "shops": {},
     "zahlungsarten": {
-        "Bank account ... 591": "ING Privat"
+        "Bank account ... 500": "Bank account ... 500"
     }
 }
