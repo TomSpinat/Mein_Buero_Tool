@@ -39,7 +39,7 @@ class ShopLogoSearchService:
         self.provider = str(settings_manager.get('shop_logo_search_provider', settings_manager.get('product_image_search_provider', 'brave')) or 'brave').strip().lower()
         self.api_url = str(settings_manager.get('shop_logo_search_api_url', settings_manager.get('product_image_search_api_url', '')) or '').strip()
         self.api_key = str(settings_manager.get('shop_logo_search_api_key', settings_manager.get('product_image_search_api_key', '')) or '').strip()
-        self.cx = str(settings_manager.get('shop_logo_search_cx', settings_manager.get('product_image_search_cx', '')) or '').strip()
+        self.cx = str(settings_manager.get('shop_logo_search_google_cx', settings_manager.get('shop_logo_search_cx', settings_manager.get('product_image_search_google_cx', ''))) or '').strip()
         self.enabled = bool(settings_manager.get('shop_logo_search_enabled', settings_manager.get('product_image_search_enabled', True)))
         self.timeout_sec = max(3, int(settings_manager.get('shop_logo_search_timeout_sec', settings_manager.get('product_image_search_timeout_sec', 8)) or 8))
         self.max_results = max(1, min(6, int(settings_manager.get('shop_logo_search_max_results', settings_manager.get('product_image_search_max_results', 6)) or 6)))
@@ -216,7 +216,7 @@ class ShopLogoSearchService:
             'count': self.raw_provider_limit,
             'search_lang': 'en',
             'spellcheck': 0,
-            'safesearch': 'moderate',
+            'safesearch': 'off',
         })
         request_url = f"{self.api_url}?{encoded_query}"
         logging.info('shop_logo_search_api_request: provider=brave, url=%s', request_url)
@@ -270,10 +270,10 @@ class ShopLogoSearchService:
     def _extract_provider_results(self, payload):
         if not isinstance(payload, dict):
             return []
-            for key in ('items', 'results', 'images'):
-                rows = payload.get(key)
-                if isinstance(rows, list):
-                    return rows
+        for key in ('items', 'results', 'images'):
+            rows = payload.get(key)
+            if isinstance(rows, list):
+                return rows
         data = payload.get('data')
         if isinstance(data, dict):
             for key in ('items', 'results', 'images'):
