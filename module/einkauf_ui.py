@@ -114,6 +114,42 @@ IMAGE_DECISION_STYLES = {
 
 CHECK_MARK = chr(10003)
 
+# --- FieldState-Styling importieren (zentrale Farbdefinition) ---
+from module.lookup_results import FieldState, FIELD_STATE_STYLES  # noqa: E402
+
+
+def set_field_state(widget, state: FieldState):
+    """Setzt die Hintergrund-/Text-/Border-Farbe eines QLineEdit nach FieldState.
+
+    Funktioniert fuer jedes QWidget mit setStyleSheet. Wird von
+    FieldLookupBinding und direkt aus Modulen heraus verwendet.
+    """
+    style = FIELD_STATE_STYLES.get(state, FIELD_STATE_STYLES[FieldState.EMPTY])
+    bg = style["bg"]
+    fg = style["fg"]
+    border = style["border"]
+    badge = style.get("badge", "")
+
+    widget.setStyleSheet(
+        f"QLineEdit {{ background-color: {bg}; color: {fg}; "
+        f"border: 2px solid {border}; border-radius: 4px; "
+        f"padding: 4px 8px; font-size: 14px; }}"
+        f"QLineEdit:focus {{ border: 2px solid #a561ff; }}"
+    )
+    # Badge als ToolTip setzen wenn vorhanden
+    if badge:
+        current_tip = str(widget.toolTip() or "").strip()
+        prefix = f"[{badge}] "
+        if not current_tip.startswith("["):
+            widget.setToolTip(prefix + current_tip)
+    else:
+        current_tip = str(widget.toolTip() or "").strip()
+        if current_tip.startswith("["):
+            # Alten Badge-Prefix entfernen
+            idx = current_tip.find("] ")
+            if idx >= 0:
+                widget.setToolTip(current_tip[idx + 2:])
+
 
 def _format_extra_value(value):
     if value is None:
@@ -567,6 +603,10 @@ class _UiMediaPreviewResolver:
         }
 
 class InlineChangeFieldRow(QWidget):
+    # Proxy signal so FieldLookupBinding can connect to returnPressed
+    # exactly like it would on a plain QLineEdit.
+    returnPressed = pyqtSignal()
+
     def __init__(self, field_key, label_text, parent=None):
         super().__init__(parent)
         self.field_key = str(field_key or "")
@@ -578,6 +618,10 @@ class InlineChangeFieldRow(QWidget):
         self._selected_side = "new"
         self._build_ui()
         self._show_normal_field("")
+
+    def setPlaceholderText(self, text: str):
+        """Proxy so callers can treat this like a QLineEdit."""
+        self.normal_input.setPlaceholderText(text)
 
     def _build_ui(self):
         layout = QHBoxLayout(self)
@@ -595,6 +639,8 @@ class InlineChangeFieldRow(QWidget):
         layout.addLayout(self.value_host, 1)
 
         self.normal_input = QLineEdit()
+        # Forward returnPressed so FieldLookupBinding works transparently
+        self.normal_input.returnPressed.connect(self.returnPressed)
         self.value_host.addWidget(self.normal_input)
 
         self.compare_widget = QWidget(self)
@@ -770,8 +816,11 @@ class InlineChangeFieldRow(QWidget):
 class EinkaufHeadFormWidget(QWidget):
     logoSearchRequested = pyqtSignal(object)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, logo_search_mode="context"):
         super().__init__(parent)
+        # "direct": Logo-Frame immer sichtbar, Suche liest shop_name direkt aus Eingabe
+        # "context": Logo-Frame nur bei vorhandenem Kontext, Suche braucht shop_name ODER sender_domain
+        self._logo_search_mode = logo_search_mode
         self.inputs = {}
         self.field_rows = {}
         self._extra_rows = []
@@ -814,7 +863,10 @@ class EinkaufHeadFormWidget(QWidget):
         self.btn_logo_search.clicked.connect(self._request_logo_search)
         shop_preview_layout.addWidget(self.btn_logo_search, 0, Qt.AlignmentFlag.AlignTop)
 
-        self.shop_preview_frame.setVisible(False)
+        if self._logo_search_mode == "direct":
+            self._show_shop_placeholder()
+        else:
+            self.shop_preview_frame.setVisible(False)
         layout.addWidget(self.shop_preview_frame)
 
         for section_title, fields in EINKAUF_FIELD_SECTIONS:
@@ -883,6 +935,15 @@ class EinkaufHeadFormWidget(QWidget):
         layout.addWidget(self.extra_frame)
         layout.addStretch()
 
+    def _show_shop_placeholder(self):
+        """Zeigt den Logo-Frame mit Platzhalter-Inhalt (wird im 'direct'-Modus genutzt)."""
+        px = create_placeholder_pixmap("?", 48, background="#202233", foreground="#414868", radius=8)
+        self.lbl_shop_logo.setPixmap(px)
+        self.lbl_shop_title.setText("Shop noch offen")
+        self.lbl_shop_media_hint.setText("Platzhalterlogo aktiv, bis ein echtes Shoplogo gefunden wird")
+        self.btn_logo_search.setText("Logo suchen")
+        self.shop_preview_frame.setVisible(True)
+
     def _update_shop_preview(self, payload):
         payload = dict(payload or {}) if isinstance(payload, dict) else {}
         current_shop_name = str(self.inputs.get("shop_name").text() or "").strip() if "shop_name" in self.inputs else ""
@@ -901,7 +962,10 @@ class EinkaufHeadFormWidget(QWidget):
                 str(payload.get("bestellnummer", "") or "").strip(),
             )
         elif not label_text:
-            self.shop_preview_frame.setVisible(False)
+            if self._logo_search_mode == "direct":
+                self._show_shop_placeholder()
+            else:
+                self.shop_preview_frame.setVisible(False)
             return
 
         preview = self._media_preview.resolve_shop_preview(payload)
@@ -914,6 +978,32 @@ class EinkaufHeadFormWidget(QWidget):
         self.shop_preview_frame.setToolTip("\n".join(tooltip_parts))
         self.btn_logo_search.setText("Logo aendern" if bool(preview.get("has_media")) else "Logo suchen")
         self.shop_preview_frame.setVisible(True)
+
+    def set_shop_logo_path(self, file_path: str):
+        """Setzt das Shop-Logo direkt aus einem lokalen Dateipfad.
+
+        Wird vom LookupService aufgerufen wenn ein Logo in der DB gefunden wurde.
+        Vermeidet damit einen API-Call.
+        """
+        import os
+        path = str(file_path or "").strip()
+        if not path or not os.path.exists(path):
+            return
+        try:
+            px = QPixmap(path)
+            if px.isNull():
+                return
+            preview_px = render_preview_pixmap(px, 48, background="#ffffff", radius=8, inset=2)
+            self.lbl_shop_logo.setPixmap(preview_px)
+            # Titel auf aktuellen Shop-Namen aktualisieren (falls im Eingabefeld vorhanden)
+            current_shop_name = str(self.inputs["shop_name"].text() or "").strip() if "shop_name" in self.inputs else ""
+            if current_shop_name and current_shop_name.lower() not in ("shop noch offen", ""):
+                self.lbl_shop_title.setText(current_shop_name)
+            self.lbl_shop_media_hint.setText("Logo aus DB geladen")
+            self.btn_logo_search.setText("Logo aendern")
+            self.shop_preview_frame.setVisible(True)
+        except Exception:
+            pass
 
     def _build_shop_search_context(self):
         payload = dict(self._payload_context or {}) if isinstance(self._payload_context, dict) else {}
@@ -936,9 +1026,16 @@ class EinkaufHeadFormWidget(QWidget):
 
     def _request_logo_search(self):
         context = self._build_shop_search_context()
-        if not str(context.get("canonical_shop_name", "") or "").strip() and not str(context.get("sender_domain", "") or "").strip():
-            QMessageBox.information(self, "Logo-Suche", "Es gibt noch nicht genug Shop-Kontext fuer eine sinnvolle Logosuche.")
-            return
+        if self._logo_search_mode == "direct":
+            # Modul 1: reicht wenn shop_name im Eingabefeld steht
+            if not str(context.get("canonical_shop_name", "") or "").strip():
+                QMessageBox.information(self, "Logo-Suche", "Bitte zuerst einen Shop-Namen eintragen.")
+                return
+        else:
+            # Modul 2 / Mail Scraper: braucht shop_name ODER sender_domain aus E-Mail-Kontext
+            if not str(context.get("canonical_shop_name", "") or "").strip() and not str(context.get("sender_domain", "") or "").strip():
+                QMessageBox.information(self, "Logo-Suche", "Es gibt noch nicht genug Shop-Kontext fuer eine sinnvolle Logosuche.")
+                return
         self.logoSearchRequested.emit(context)
 
     def _clear_extra_rows(self):
@@ -1011,7 +1108,10 @@ class EinkaufHeadFormWidget(QWidget):
         self.chk_reverse_charge.setChecked(False)
         self._clear_extra_rows()
         self.extra_frame.setVisible(False)
-        self.shop_preview_frame.setVisible(False)
+        if self._logo_search_mode == "direct":
+            self._show_shop_placeholder()
+        else:
+            self.shop_preview_frame.setVisible(False)
 
 class ReviewSelectableLineEdit(QLineEdit):
     clicked = pyqtSignal()

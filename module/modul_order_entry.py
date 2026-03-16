@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy, QMessageBox, QApplication, QTextEdit,
     QTableWidget, QTableWidgetItem, QHeaderView, QRadioButton, QButtonGroup,
     QTabWidget, QComboBox, QFileDialog, QMenu, QDialog, QDialogButtonBox, QSpinBox,
+    QScrollArea,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QMimeData, QSize, QThread
 from PyQt6.QtGui import QPixmap, QImage, QClipboard, QPainter
@@ -43,6 +44,10 @@ from module.crash_logger import (
     log_classified_error,
     log_exception,
 )
+from module.lookup_service import LookupService
+from module.lookup_results import FieldState, FieldType, LookupSource
+from module.field_lookup_binding import FieldLookupBinding, create_bindings
+from module.einkauf_ui import EinkaufHeadFormWidget, set_field_state
 class GeminiWorker(QThread):
     finished_signal = pyqtSignal(dict)
     error_signal = pyqtSignal(str)
@@ -176,7 +181,12 @@ class OrderEntryApp(QWidget):
         
         self.logo_search_service = ShopLogoSearchService(self.settings_manager)
         self.image_search_service = ProductImageSearchService(self.settings_manager)
-        
+
+        # --- Zentraler LookupService ---
+        self._lookup_db = DatabaseManager(self.settings_manager)
+        self._lookup_service = LookupService(self._lookup_db)
+        self._lookup_bindings: dict[str, FieldLookupBinding] = {}
+
         self.main_layout = QVBoxLayout(self)
         self.tabs = QTabWidget()
         self.tabs.setStyleSheet("""
@@ -284,13 +294,31 @@ class OrderEntryApp(QWidget):
         self.lbl_form = QLabel("<h3>2. Kopfdaten (Einkauf)</h3>")
         right_layout.addWidget(self.lbl_form)
 
+        # --- EinkaufHeadFormWidget fuer Einkauf-Modus (InlineChangeFieldRow, Split-View) ---
+        self.einkauf_form_widget = EinkaufHeadFormWidget(self, logo_search_mode="direct")
+        self.einkauf_form_widget.logoSearchRequested.connect(self._start_logo_search_from_context)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setWidget(self.einkauf_form_widget)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_area.setMaximumHeight(420)
+        self._einkauf_form_scroll = scroll_area
+        right_layout.addWidget(self._einkauf_form_scroll)
+
+        # --- Legacy QFormLayout-Container fuer Verkauf-Modus ---
+        self.form_layout_frame = QWidget()
+        _ff_layout = QVBoxLayout(self.form_layout_frame)
+        _ff_layout.setContentsMargins(0, 0, 0, 0)
         self.form_layout = QFormLayout()
-        right_layout.addLayout(self.form_layout)
-        
+        _ff_layout.addLayout(self.form_layout)
+        self.form_layout_frame.setVisible(False)
+        right_layout.addWidget(self.form_layout_frame)
+
         # Tabelle für Warenpositionen (Einkauf oder Verkauf)
         lbl_waren = QLabel("<h3>3. Erfasste Artikel</h3>")
         right_layout.addWidget(lbl_waren)
-        
+
         self.table_waren = QTableWidget()
         self.table_waren.setColumnCount(7) # Bild + Produkt + Variante + EAN + Menge + Preis + Suchen
         # Erlaube dem Nutzer die Spaltenbreite manuell anzupassen
@@ -299,7 +327,6 @@ class OrderEntryApp(QWidget):
         self.table_waren.verticalHeader().setDefaultSectionSize(45) # Größer wegen dem QLineEdit Padding
         right_layout.addWidget(self.table_waren)
 
-
         ean_row = QHBoxLayout()
         self.btn_ean_lookup = QPushButton("EAN suchen (markierte Zeile)")
         self.btn_ean_lookup.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -307,12 +334,13 @@ class OrderEntryApp(QWidget):
         ean_row.addWidget(self.btn_ean_lookup)
         ean_row.addStretch()
         right_layout.addLayout(ean_row)
+
         # Initial die Tabelle und das Formular aufbauen
         self._build_dynamic_form()
 
         # Buttons
         button_layout = QHBoxLayout()
-        
+
         self.btn_reset = QPushButton("🗑️ Formular leeren")
         self.btn_reset.clicked.connect(self._reset_form)
         button_layout.addWidget(self.btn_reset)
@@ -327,64 +355,46 @@ class OrderEntryApp(QWidget):
         self.scanner_layout.addLayout(right_layout, stretch=2)
 
     def _build_dynamic_form(self):
-        # Alle bestehenden Widgets aus dem form_layout entfernen
-        while self.form_layout.count():
-            item = self.form_layout.takeAt(0)
-            widget = item.widget()
-            if widget:
-                widget.deleteLater()
-
         self.inputs = {}
         if self.scan_mode == "einkauf":
-            fields = [
-                ("bestellnummer", "Bestellnummer:"),
-                ("kaufdatum", "Kaufdatum:"),
-                ("bestell_email", "Bestell-Email:"),
-                ("tracking_nummer_einkauf", "Tracking Code:"),
-                ("sendungsstatus", "Sendungsstatus:"),
-                ("lieferdatum", "Lieferdatum:"),
-                ("gesamt_ekp_brutto", "Gesamtpreis (Brutto):"),
-                ("versandkosten_brutto", "Versandkosten (Brutto):"),
-                ("nebenkosten_brutto", "Nebenkosten (Brutto):"),
-                ("rabatt_brutto", "Rabatt/Gutschrift (Brutto):"),
-                ("ust_satz", "USt.-Satz:"),
-                ("zahlungsart", "Zahlungsart (Normiert):")
-            ]
+            # EinkaufHeadFormWidget anzeigen, Legacy-Layout ausblenden
+            self._einkauf_form_scroll.setVisible(True)
+            self.form_layout_frame.setVisible(False)
+
+            # inputs direkt aus EinkaufHeadFormWidget uebernehmen (InlineChangeFieldRow)
+            self.inputs = self.einkauf_form_widget.inputs
+
+            # lbl_shop_logo / btn_logo_search als Properties weiterleiten (Legacy-Kompatibilitaet)
+            self.lbl_shop_logo = self.einkauf_form_widget.lbl_shop_logo
+            self.btn_logo_search = self.einkauf_form_widget.btn_logo_search
+
             self.table_waren.setHorizontalHeaderLabels(["Bild", "Produkt", "Variante", "EAN", "Menge", "Stückpreis", ""])
-
-            # Shop-Logo-Vorschau (Placeholder "?")
-            self.lbl_shop_logo = QLabel()
-            self.lbl_shop_logo.setFixedSize(52, 52)
-            self.lbl_shop_logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.lbl_shop_logo.setStyleSheet("QLabel { background-color: transparent; border: 1px solid #30374d; border-radius: 8px; }")
-            self.lbl_shop_logo.setPixmap(create_placeholder_pixmap("?", 48))
-
-            # Shop-Name-Zeile mit Logo-Vorschau und "Logo suchen"-Button
-            shop_le = QLineEdit()
-            shop_le.setPlaceholderText("Warte auf KI...")
-            self.inputs["shop_name"] = shop_le
-            shop_row = QHBoxLayout()
-            shop_row.setSpacing(6)
-            shop_row.addWidget(self.lbl_shop_logo)
-            shop_row.addWidget(shop_le, 1)
-            self.btn_logo_search = QPushButton("Logo suchen")
-            self.btn_logo_search.setCursor(Qt.CursorShape.PointingHandCursor)
-            self.btn_logo_search.clicked.connect(self._start_logo_search)
-            shop_row.addWidget(self.btn_logo_search)
-            self.form_layout.addRow("Shop-Name (Normiert):", shop_row)
         else:
+            # Legacy-QFormLayout fuer Verkauf-Modus
+            self._einkauf_form_scroll.setVisible(False)
+            self.form_layout_frame.setVisible(True)
+
+            # Alte Widgets entfernen
+            while self.form_layout.count():
+                item = self.form_layout.takeAt(0)
+                widget = item.widget()
+                if widget:
+                    widget.deleteLater()
+
             fields = [
                 ("ticket_name", "Ticket-Name:"),
                 ("kaeufer", "Käufer/Nutzername:"),
                 ("zahlungsziel", "Zahlungsziel:")
             ]
             self.table_waren.setHorizontalHeaderLabels(["Produkt", "EAN", "Menge", "VK Brutto", "Marge gesamt"])
+            for db_key, label_text in fields:
+                le = QLineEdit()
+                le.setPlaceholderText("Warte auf KI...")
+                self.inputs[db_key] = le
+                self.form_layout.addRow(label_text, le)
 
-        for db_key, label_text in fields:
-            le = QLineEdit()
-            le.setPlaceholderText("Warte auf KI...")
-            self.inputs[db_key] = le
-            self.form_layout.addRow(label_text, le)
+        # --- Lookup-Bindings fuer bekannte Felder erstellen ---
+        self._setup_lookup_bindings()
 
     def _upload_document(self):
         """Erlaubt das Auswaehlen einer Beleg-Datei aus einem Ordner (Bild oder PDF)."""
@@ -519,12 +529,16 @@ class OrderEntryApp(QWidget):
 
     def _fill_ui(self):
         """Füllt das GUI aus dem current_gemini_data Dictionary."""
-        for db_key, line_edit in self.inputs.items():
-            value = str(self.current_gemini_data.get(db_key, ""))
-            if value == "None" or not value:
-                value = ""
-            line_edit.setText(value)
-            
+        if self.scan_mode == "einkauf":
+            # EinkaufHeadFormWidget.set_payload befuellt alle Felder + Shop-Vorschau in einem Zug
+            self.einkauf_form_widget.set_payload(self.current_gemini_data)
+        else:
+            for db_key, line_edit in self.inputs.items():
+                value = str(self.current_gemini_data.get(db_key, ""))
+                if value == "None" or not value:
+                    value = ""
+                line_edit.setText(value)
+
         waren = self.current_gemini_data.get("waren", [])
         self.table_waren.setRowCount(len(waren))
         
@@ -566,6 +580,233 @@ class OrderEntryApp(QWidget):
 
         self.table_waren.resizeColumnsToContents()
         self.btn_save_db.setEnabled(True)
+
+        # Nach AI-Fill: Lookup-Bindings fuer die befuellten Felder triggern
+        self._trigger_post_fill_lookups()
+
+    # ── Zentraler LookupService: Setup + Handler ──────────────────────
+
+    def _setup_lookup_bindings(self):
+        """Richtet Lookup-Bindings fuer shop_name und zahlungsart ein."""
+        # Alte Bindings aufräumen
+        for binding in self._lookup_bindings.values():
+            binding.deleteLater()
+        self._lookup_bindings.clear()
+
+        if self.scan_mode != "einkauf":
+            return
+
+        self._lookup_bindings = create_bindings(
+            widgets=self.inputs,
+            lookup_service=self._lookup_service,
+            result_handler=self._on_lookup_result,
+            parent_widget=self,
+        )
+
+    def _trigger_post_fill_lookups(self):
+        """Triggert Lookups nach KI-Fill fuer alle relevanten Felder."""
+        if self.scan_mode != "einkauf":
+            return
+
+        for key, binding in self._lookup_bindings.items():
+            text = str(self.inputs.get(key, QLineEdit()).text()).strip()
+            if text:
+                binding.set_state(FieldState.AI_SUGGESTED)
+                binding.trigger_lookup(text)
+            else:
+                binding.set_state(FieldState.EMPTY)
+
+    def _on_lookup_result(self, result):
+        """Zentraler Handler fuer alle Lookup-Ergebnisse."""
+        try:
+            if result.field_type == FieldType.SHOP_NAME:
+                self._handle_shop_lookup_result(result)
+            elif result.field_type == FieldType.ZAHLUNGSART:
+                self._handle_zahlungsart_lookup_result(result)
+            elif result.field_type == FieldType.BESTELLNUMMER:
+                self._handle_bestellnummer_lookup_result(result)
+            # KAUFDATUM: FieldLookupBinding setzt den State direkt – kein extra Handler noetig
+        except Exception as exc:
+            log_exception(__name__, exc)
+
+    def _handle_shop_lookup_result(self, result):
+        """Verarbeitet Shop-Lookup-Ergebnis: Logo anzeigen, Dialoge oeffnen."""
+        # Logo anzeigen wenn gefunden – nutzt set_shop_logo_path damit der Frame sichtbar wird
+        if result.has_logo and hasattr(self, "einkauf_form_widget"):
+            self.einkauf_form_widget.set_shop_logo_path(result.logo_path)
+
+        # Amazon-Dialog oeffnen wenn noetig
+        if result.source == LookupSource.AMAZON_DIALOG and result.needs_confirm:
+            from module.amazon_country_dialog import AmazonCountryDialog
+            raw_name = result.data.get("raw_shop_name", "Amazon")
+            dialog = AmazonCountryDialog(parent=self, raw_value=raw_name)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                normalized = dialog.selected_country
+                self.inputs["shop_name"].setText(normalized)
+                # Re-Lookup mit normalisiertem Wert (um Logo zu finden)
+                binding = self._lookup_bindings.get("shop_name")
+                if binding:
+                    binding.trigger_lookup(normalized)
+
+        # Normalization-Dialog oeffnen wenn noetig (kein Amazon, aber unbekannt)
+        elif result.source == LookupSource.NORMALIZATION_DIALOG and result.needs_confirm:
+            from module.amazon_country_dialog import SPECIFIC_AMAZON_VALUES
+            from module.normalization_dialog import normalize_value
+            raw_name = result.data.get("raw_shop_name", "")
+            # Spezifische Amazon-Shops (z.B. "Amazon DE") nicht nochmal normalisieren
+            if raw_name and raw_name.lower() not in SPECIFIC_AMAZON_VALUES:
+                normalized = normalize_value("shops", raw_name, parent_widget=self)
+                if normalized and normalized != raw_name:
+                    self.inputs["shop_name"].setText(normalized)
+                    binding = self._lookup_bindings.get("shop_name")
+                    if binding:
+                        binding.set_state(FieldState.USER_CONFIRMED)
+                        binding.trigger_lookup(normalized)
+
+        # Normalisierten Wert eintragen wenn vorhanden
+        elif result.normalized_value and result.found:
+            current_text = str(self.inputs.get("shop_name", QLineEdit()).text()).strip()
+            if result.normalized_value != current_text:
+                self.inputs["shop_name"].setText(result.normalized_value)
+
+    def _handle_zahlungsart_lookup_result(self, result):
+        """Verarbeitet Zahlungsart-Lookup-Ergebnis."""
+        if result.source == LookupSource.NORMALIZATION_DIALOG and result.needs_confirm:
+            from module.normalization_dialog import normalize_value
+            raw_value = result.data.get("raw_zahlungsart", "")
+            if raw_value:
+                normalized = normalize_value("zahlungsarten", raw_value, parent_widget=self)
+                if normalized and normalized != raw_value:
+                    self.inputs["zahlungsart"].setText(normalized)
+                    binding = self._lookup_bindings.get("zahlungsart")
+                    if binding:
+                        binding.set_state(FieldState.USER_CONFIRMED)
+
+        elif result.normalized_value and result.found:
+            current_text = str(self.inputs.get("zahlungsart", QLineEdit()).text()).strip()
+            if result.normalized_value != current_text:
+                self.inputs["zahlungsart"].setText(result.normalized_value)
+
+    def _handle_bestellnummer_lookup_result(self, result):
+        """Verarbeitet Bestellnummer-Lookup: OVERWRITE (gelb) wenn schon in DB.
+        Bei OVERWRITE werden alle vorhandenen DB-Daten geladen und in der
+        Split-View (InlineChangeFieldRow) angezeigt.
+        """
+        widget = self.inputs.get("bestellnummer")
+        if not widget:
+            return
+        if result.state == FieldState.OVERWRITE:
+            bestellnummer = str(widget.text() or "").strip()
+            widget.setToolTip(
+                f"Bestellnummer '{bestellnummer}' "
+                f"ist bereits in der Datenbank gespeichert.\n"
+                f"Beim Speichern wird der bestehende Eintrag aktualisiert."
+            )
+            # Bestehende Bestellung laden + Split-View Vergleich anzeigen
+            self._load_existing_order_for_review(bestellnummer)
+        else:
+            widget.setToolTip("Neue Bestellnummer – noch nicht gespeichert.")
+            # Review-Ansicht zuruecksetzen wenn Bestellnummer neu ist
+            if hasattr(self, "einkauf_form_widget"):
+                self.einkauf_form_widget.clear_review_data()
+
+    def _load_existing_order_for_review(self, bestellnummer: str):
+        """Laed die bestehende Bestellung und zeigt den Split-View Vergleich.
+
+        Genau wie _refresh_order_review() im Mail-Scraper-Wizard:
+        - Aktuellen Payload aus den Eingabefeldern aufbauen
+        - EinkaufPipeline.build_order_review_bundle() aufrufen
+        - einkauf_form_widget.set_review_data(bundle) aufrufen
+          → InlineChangeFieldRow zeigt Alt (gelb) | Pfeil | Neu (gruen)
+        """
+        try:
+            nr = str(bestellnummer or "").strip()
+            if not nr:
+                return
+
+            # Aktuellen Stand aller Eingabefelder als Payload sammeln
+            payload = {}
+            for key, widget in self.inputs.items():
+                payload[key] = str(widget.text() or "").strip()
+
+            # Waren aus der Tabelle hinzufuegen (fuer vollstaendigen Payload)
+            waren = []
+            for r in range(self.table_waren.rowCount()):
+                if self.scan_mode == "einkauf":
+                    item_produkt = self.table_waren.item(r, 1)
+                    item_var = self.table_waren.item(r, 2)
+                    item_ean = self.table_waren.item(r, 3)
+                    item_menge = self.table_waren.item(r, 4)
+                    item_preis = self.table_waren.item(r, 5)
+                    waren.append({
+                        "produkt_name": item_produkt.text() if item_produkt else "",
+                        "varianten_info": item_var.text() if item_var else "",
+                        "ean": item_ean.text() if item_ean else "",
+                        "menge": item_menge.text() if item_menge else "1",
+                        "ekp_brutto": item_preis.text() if item_preis else "0.00",
+                    })
+            payload["waren"] = waren
+
+            # Review-Bundle aufbauen (nutzt preview_order_enrichment fuer Diff)
+            bundle = EinkaufPipeline.build_order_review_bundle(
+                self.settings_manager,
+                payload,
+                db=self._lookup_db,
+            )
+            order_preview = bundle.get("order_preview", {}) if isinstance(bundle, dict) else {}
+            if not order_preview.get("order_exists"):
+                self.einkauf_form_widget.clear_review_data()
+                return
+
+            # Alle bestehenden DB-Werte in die Maske laden (erscheinen grau/neutral)
+            existing_order = order_preview.get("existing_order", {})
+            if existing_order:
+                self.einkauf_form_widget.set_payload(existing_order)
+                # current_gemini_data mit DB-Werten vorbelegen, damit Speichern ohne Scan funktioniert
+                self.current_gemini_data = dict(existing_order)
+
+            # Warenpositionen aus DB in die Tabelle laden
+            existing_waren = order_preview.get("existing_waren", [])
+            if existing_waren:
+                self.table_waren.setRowCount(len(existing_waren))
+                for row, item in enumerate(existing_waren):
+                    produkt_name = str(item.get("produkt_name", "")).strip()
+                    # Spalte 0: Produktbild-Platzhalter
+                    img_label = QLabel()
+                    img_label.setFixedSize(42, 42)
+                    img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    first_letter = (produkt_name[:1] or "P").upper()
+                    img_label.setPixmap(create_placeholder_pixmap(first_letter, 38, background="#202233", foreground="#a9b1d6"))
+                    img_label.setStyleSheet("QLabel { background-color: transparent; border: none; }")
+                    self.table_waren.setCellWidget(row, 0, img_label)
+                    self.table_waren.setRowHeight(row, 46)
+                    self.table_waren.setItem(row, 1, QTableWidgetItem(produkt_name))
+                    self.table_waren.setItem(row, 2, QTableWidgetItem(str(item.get("varianten_info", ""))))
+                    self.table_waren.setItem(row, 3, QTableWidgetItem(str(item.get("ean", ""))))
+                    self.table_waren.setItem(row, 4, QTableWidgetItem(str(item.get("menge", "1"))))
+                    self.table_waren.setItem(row, 5, QTableWidgetItem(str(item.get("ekp_brutto", "0.00"))))
+                    btn_img = QPushButton("Suchen")
+                    btn_img.setCursor(Qt.CursorShape.PointingHandCursor)
+                    btn_img.clicked.connect(lambda checked, r=row: self._start_product_image_search(r))
+                    self.table_waren.setCellWidget(row, 6, btn_img)
+                self.table_waren.resizeColumnsToContents()
+                # Waren auch in current_gemini_data eintragen
+                self.current_gemini_data["waren"] = [dict(w) for w in existing_waren]
+
+            # Split-View fuer geaenderte Felder einblenden;
+            # unveraenderte Felder behalten ihren gerade gesetzten Wert (clear_review_change bewahrt ihn)
+            self.einkauf_form_widget.set_review_data(bundle)
+
+            # Speichern ermoeglichen auch ohne vorherigen KI-Scan
+            self.btn_save_db.setEnabled(True)
+
+        except Exception as exc:
+            log_exception(__name__, exc)
+
+    def _start_logo_search_from_context(self, context):
+        """Slot fuer EinkaufHeadFormWidget.logoSearchRequested – delegiert an _start_logo_search()."""
+        self._start_logo_search()
+
     def _lookup_ean_for_selected_row(self):
         if self.ean_lookup_worker is not None and self.ean_lookup_worker.isRunning():
             CustomMsgBox.information(self, "EAN Suche", "Es laeuft bereits eine EAN-Suche im Hintergrund.")
@@ -702,9 +943,11 @@ class OrderEntryApp(QWidget):
         self.logo_search_worker.start()
 
     def _finish_logo_search_ui(self):
-        if hasattr(self, "btn_logo_search"):
-            self.btn_logo_search.setEnabled(True)
-            self.btn_logo_search.setText("Logo suchen")
+        if hasattr(self, "einkauf_form_widget"):
+            self.einkauf_form_widget.btn_logo_search.setEnabled(True)
+            # Text basierend auf ob ein Logo bereits gespeichert ist
+            shop_name = str(self.inputs.get("shop_name", QLineEdit()).text()).strip()
+            self.einkauf_form_widget.btn_logo_search.setText("Logo suchen")
         self.logo_search_worker = None
 
     def _on_logo_search_finished(self, result_dict):
@@ -745,12 +988,19 @@ class OrderEntryApp(QWidget):
             if isinstance(result, dict):
                 asset = result.get("asset") or {}
                 logo_path = str(asset.get("file_path", "") or "").strip()
-            if logo_path and hasattr(self, "lbl_shop_logo"):
-                logo_path = self._resolve_media_path(logo_path)
-                source_px = QPixmap(logo_path)
-                if not source_px.isNull():
-                    self.lbl_shop_logo.setPixmap(render_preview_pixmap(source_px, 48, background="#ffffff", radius=8, inset=2))
+            if logo_path and hasattr(self, "einkauf_form_widget"):
+                # Pfad korrekt aufloesen (unabhaengig vom CWD)
+                from module.media.media_store import LocalMediaStore
+                abs_logo_path = LocalMediaStore().resolve_path(logo_path) if not os.path.isabs(logo_path) else logo_path
+                if abs_logo_path and os.path.exists(abs_logo_path):
+                    logo_path = abs_logo_path
+                # set_shop_logo_path macht das Frame sichtbar und setzt das Pixmap
+                self.einkauf_form_widget.set_shop_logo_path(logo_path)
             CustomMsgBox.information(self, "Logo-Suche", f"Logo fuer '{shop_name}' wurde gespeichert.")
+            # Lookup neu starten damit auch Feld-State aktualisiert wird
+            binding = self._lookup_bindings.get("shop_name")
+            if binding:
+                binding.trigger_lookup(shop_name)
         except Exception as exc:
             log_exception(__name__, exc)
             CustomMsgBox.warning(self, "Logo-Suche", f"Das Logo konnte nicht gespeichert werden:\n{exc}")
@@ -885,14 +1135,19 @@ class OrderEntryApp(QWidget):
         self.scan_temp_file_path = None
         self.drop_box.lbl_text.setPixmap(QPixmap())
         self.drop_box.lbl_text.setText("Drag & Drop hier\noder Strg+V / Datei-Auswahl (Bild/PDF)")
-        
+
         self.txt_anweisung.clear()
-        for le in self.inputs.values():
-            le.clear()
-            
+
+        if self.scan_mode == "einkauf":
+            # clear_values() leert alle InlineChangeFieldRows, blendet Shop-Vorschau aus
+            self.einkauf_form_widget.clear_values()
+        else:
+            for le in self.inputs.values():
+                le.clear()
+
         self.table_waren.setRowCount(0)
         self.current_gemini_data = {}
-        
+
         self.btn_scan.setEnabled(False)
         self.btn_save_db.setEnabled(False)
 
@@ -901,14 +1156,15 @@ class OrderEntryApp(QWidget):
         self.product_image_search_worker = None
         self._pending_image_search_context = None
 
-        # Logo-Vorschau auf Placeholder zuruecksetzen
-        if hasattr(self, "lbl_shop_logo"):
-            self.lbl_shop_logo.setPixmap(create_placeholder_pixmap("?", 48))
-
     def _save_to_database(self):
-        # UI Änderungen zurück in das gemini dict spielen
-        for db_key, line_edit in self.inputs.items():
-            self.current_gemini_data[db_key] = line_edit.text()
+        # UI-Aenderungen zurueck in das gemini dict spielen
+        if self.scan_mode == "einkauf":
+            # apply_to_payload uebernimmt alle InlineChangeFieldRow-Werte (inkl. review-Selektion)
+            # sowie die Reverse-Charge-Checkbox
+            self.current_gemini_data = self.einkauf_form_widget.apply_to_payload(self.current_gemini_data)
+        else:
+            for db_key, line_edit in self.inputs.items():
+                self.current_gemini_data[db_key] = line_edit.text()
             
         # Tabelle auslesen
         rows = self.table_waren.rowCount()
@@ -958,8 +1214,6 @@ class OrderEntryApp(QWidget):
                     self.settings_manager,
                     db=save_result.get("db")
                 )
-                title, text = EinkaufPipeline.build_match_result_message(match_result)
-                CustomMsgBox.information(self, title, text)
                 self._reset_form()
             except Exception as e:
                 log_exception(__name__, e)

@@ -263,15 +263,7 @@ class EinkaufPipeline:
                     CustomMsgBox.information(parent, "Neue Bestellung", f"Neue Bestellnummer gesetzt: {new_no}")
                 bestellnummer = new_no
         else:
-            save_reply = CustomMsgBox.question(
-                parent,
-                "Speichern bestaetigen",
-                f"Neue Bestellung {bestellnummer} wirklich speichern?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.Yes,
-            )
-            if save_reply != QMessageBox.StandardButton.Yes:
-                return {"status": "discarded", "bestellnummer": bestellnummer, "renamed": False, "db": db}
+            pass  # Neue Bestellung – direkt speichern ohne Rueckfrage
 
         save_info = db.upsert_einkauf_mit_waren(clean_item, apply_pending_match=False)
         einkauf_id = save_info.get("einkauf_id") if isinstance(save_info, dict) else None

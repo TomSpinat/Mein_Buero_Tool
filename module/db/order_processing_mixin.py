@@ -329,6 +329,26 @@ class OrderProcessingMixin:
             log_exception(__name__, exc, extra={"bestellnummer": bestellnummer})
             logging.warning("Produktbilder oder Screenshot-Detektionen aus dem Payload konnten nicht in die Medienstruktur uebernommen werden: %s", exc)
 
+    def bestellnummer_exists(self, bestellnummer: str) -> bool:
+        """Prueft ob eine Bestellnummer bereits in einkauf_bestellungen existiert."""
+        nr = str(bestellnummer or "").strip()
+        if not nr:
+            return False
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT 1 FROM einkauf_bestellungen WHERE bestellnummer = %s LIMIT 1",
+                (nr,),
+            )
+            found = cursor.fetchone() is not None
+            cursor.close()
+            conn.close()
+            return found
+        except Exception as e:
+            log_exception(__name__, e, extra={"bestellnummer": bestellnummer})
+            return False
+
     def upsert_einkauf_mit_waren(self, data_dict, apply_pending_match=True):
         """
         Nimmt das normierte Gemini JSON-Dictionary entgegen und speichert
@@ -964,6 +984,26 @@ class OrderProcessingMixin:
             head_over = [format_change_line(x) for x in head_changes if x.get("change_kind") == "overwrite"]
             pos_new = [format_change_line(x) for x in item_changes if x.get("change_kind") == "item_add"]
             pos_over = [format_change_line(x) for x in item_changes if x.get("change_kind") == "item_update"]
+            existing_order_flat = {
+                k: (v.strftime("%Y-%m-%d") if hasattr(v, "strftime") else ("" if v is None else str(v)))
+                for k, v in existing.items()
+            }
+            # Immer alle Warenpositionen laden (unabhaengig von input_rows)
+            cursor.execute(
+                "SELECT produkt_name, varianten_info, ean, menge, ekp_brutto "
+                "FROM waren_positionen WHERE einkauf_id = %s ORDER BY id ASC",
+                (existing["id"],),
+            )
+            existing_waren = [
+                {
+                    "produkt_name": str(r.get("produkt_name", "") or "").strip(),
+                    "varianten_info": str(r.get("varianten_info", "") or "").strip(),
+                    "ean": str(r.get("ean", "") or "").strip(),
+                    "menge": str(self._to_int(r.get("menge", 1), default=1)),
+                    "ekp_brutto": str(self._round_money(self._to_float(r.get("ekp_brutto", 0.0)))),
+                }
+                for r in (cursor.fetchall() or [])
+            ]
             return {
                 "order_exists": True,
                 "order_id": existing["id"],
@@ -987,6 +1027,8 @@ class OrderProcessingMixin:
                 "conservative_note": "Gelb markierte Kopfwerte koennen nach deiner Bestaetigung aktualisiert werden. Bei geschuetzten Positionen zieht die aktuelle Speicherlogik weiterhin nur fehlende Positionswerte nach.",
                 "item_rows": item_rows,
                 "item_summary": item_summary,
+                "existing_order": existing_order_flat,
+                "existing_waren": existing_waren,
             }
         except Exception as e:
             log_exception(__name__, e)

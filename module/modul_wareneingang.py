@@ -33,6 +33,8 @@ from PyQt6.QtWidgets import (
 
 from module.crash_logger import log_exception
 from module.database_manager import DatabaseManager
+from module.lookup_service import LookupService
+from module.lookup_results import FieldState, FieldType
 from module.order_visual_state import OrderVisualState
 from module.order_visual_ui import CompactOrderVisualWidget, OrderVisualResolver
 from module.status_model import InventoryStatus, ShipmentStatus, shipment_db_value
@@ -672,12 +674,35 @@ class OrderDetailPage(QWidget):
                     found_idx = idx
                     break
         if found_idx == -1:
-            self._lbl_status.setText("❌ EAN nicht gefunden oder bereits vollzählig!")
-            self._lbl_status.setStyleSheet("color: #f7768e; font-size: 14px; font-weight: bold;")
+            # --- Reverse-Lookup: EAN in lokaler DB nachschlagen ---
+            lookup_result = self._parent_app_lookup_service().reverse_lookup_ean_to_name(ean)
+            if lookup_result.found:
+                name = lookup_result.data.get("produkt_name", ean)
+                self._lbl_status.setText(
+                    f"\u26a0 EAN nicht in dieser Bestellung. DB-Treffer: {name}"
+                )
+                self._lbl_status.setStyleSheet(
+                    "color: #e0af68; font-size: 14px; font-weight: bold;"
+                )
+            else:
+                self._lbl_status.setText("\u274c EAN nicht gefunden oder bereits vollzaehlig!")
+                self._lbl_status.setStyleSheet(
+                    "color: #f7768e; font-size: 14px; font-weight: bold;"
+                )
         else:
-            self._lbl_status.setText(f"✅ EAN erkannt! {self.positionen[found_idx]['produkt_name']}")
+            self._lbl_status.setText(f"\u2705 EAN erkannt! {self.positionen[found_idx]['produkt_name']}")
             self._lbl_status.setStyleSheet("color: #9ece6a; font-size: 14px; font-weight: bold;")
             self._change_amount(found_idx, 1)
+
+    def _parent_app_lookup_service(self) -> LookupService:
+        """Holt den LookupService vom Parent (WareneingangApp)."""
+        parent = self.parent()
+        while parent is not None:
+            if isinstance(parent, WareneingangApp):
+                return parent.lookup_service
+            parent = parent.parent()
+        # Fallback: eigene DB-Instanz
+        return LookupService(self.db)
 
     def _update_finish_button(self):
         if not self.positionen:
@@ -723,6 +748,7 @@ class WareneingangApp(QWidget):
         super().__init__()
         self.settings = settings_manager
         self.db = DatabaseManager(self.settings)
+        self.lookup_service = LookupService(self.db)
         self.order_visuals = OrderVisualResolver(self.settings)
 
         self._pending_visual_refresh = False

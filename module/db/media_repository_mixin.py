@@ -319,6 +319,37 @@ class MediaRepositoryMixin:
             logging.error(f"Fehler bei get_primary_shop_logo_link: {e}")
             return None
 
+    def get_primary_shop_logo_link_by_name(self, shop_name=""):
+        """Sucht einen Shop-Logo-Link ueber den gespeicherten shop_name (Fallback).
+
+        Nuetzlich wenn aeltere Eintraege einen anderen shop_key-Format hatten
+        aber den richtigen shop_name enthalten.
+        """
+        try:
+            name_text = str(shop_name or "").strip()
+            if not name_text:
+                return None
+            conn = self._get_connection()
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute(
+                """
+                SELECT *
+                FROM shop_logo_links
+                WHERE LOWER(shop_name) = LOWER(%s)
+                ORDER BY is_primary DESC, priority ASC, confidence DESC, updated_at DESC
+                LIMIT 1
+                """,
+                (name_text,),
+            )
+            row = cursor.fetchone()
+            cursor.close()
+            conn.close()
+            return row or None
+        except Exception as e:
+            log_exception(__name__, e, extra={"shop_name": shop_name})
+            logging.error(f"Fehler bei get_primary_shop_logo_link_by_name: {e}")
+            return None
+
     def upsert_product_image_link(
         self,
         product_key,

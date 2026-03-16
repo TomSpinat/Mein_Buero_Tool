@@ -63,8 +63,15 @@ from module.crash_logger import (
   log_classified_error,
   log_exception,
 )
+from module.lookup_service import LookupService
+from module.lookup_results import FieldState, FieldType, LookupSource
 from module.secret_store import sanitize_text
 from module.safe_mail_renderer import SafeMailRenderer
+from module.shop_logo_search_service import ShopLogoSearchService
+from module.shop_logo_search_worker import ShopLogoSearchWorker
+from module.media.media_grid_selection_dialog import MediaGridSelectionDialog
+from module.media.media_service import MediaService
+from module.media.media_store import LocalMediaStore
 
 
 class AddAccountDialog(QDialog):
@@ -1921,9 +1928,16 @@ class ScraperReviewWizardDialog(QDialog):
     self.ean_service = EanService(self.settings_manager)
     self.ean_lookup_worker = None
     self._pending_ean_lookup_context = None
+    self._logo_search_worker = None
+    self._logo_search_service = ShopLogoSearchService(self.settings_manager)
     self.data_list = [dict(x) for x in (data_list or []) if isinstance(x, dict)]
     self.current_index = 0
     self._shared_db = None
+
+    # --- Zentraler LookupService (fuer DB-Lookups VOR API-Calls) ---
+    from module.database_manager import DatabaseManager
+    self._lookup_db = DatabaseManager(self.settings_manager)
+    self._lookup_service = LookupService(self._lookup_db)
     self._preview_processes = []
     self._mapping_done_by_index = {}
     self._mapping_prompted_by_index = {}
@@ -2077,6 +2091,7 @@ class ScraperReviewWizardDialog(QDialog):
     data_box.addWidget(lbl_data)
 
     self.einkauf_form_widget = EinkaufHeadFormWidget(self)
+    self.einkauf_form_widget.logoSearchRequested.connect(self._on_manual_logo_search_requested)
     self.inputs = self.einkauf_form_widget.inputs
     self.einkauf_form_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
     data_box.addWidget(self.einkauf_form_widget)
@@ -2540,6 +2555,134 @@ class ScraperReviewWizardDialog(QDialog):
     idx = self.current_index
     QTimer.singleShot(0, lambda idx=idx: self._auto_prompt_mapping_for_index(idx))
 
+    # --- LookupService: Logo aus DB laden bevor API aufgerufen wird ---
+    self._auto_lookup_shop_logo_from_db()
+
+  def _auto_lookup_shop_logo_from_db(self):
+    """Prueft beim Laden einer Mail ob ein Shop-Logo in der lokalen DB existiert.
+
+    Wird VOR dem Mapping aufgerufen. Wenn ein Logo lokal existiert, wird
+    es sofort angezeigt – ohne Brave-API-Call.
+    """
+    try:
+      item = self._current_mail_item()
+      shop_name = str(item.get("shop_name", "") or "").strip()
+      sender_domain = ""
+      email = str(item.get("bestell_email", "") or "").strip()
+      if "@" in email:
+        sender_domain = email.split("@", 1)[1].strip().lower()
+
+      if not shop_name and not sender_domain:
+        return
+
+      result = self._lookup_service.lookup_shop(
+        shop_name=shop_name,
+        sender_domain=sender_domain,
+      )
+
+      if result.has_logo and hasattr(self, "einkauf_form_widget"):
+        self.einkauf_form_widget.set_shop_logo_path(result.logo_path)
+
+    except Exception as exc:
+      log_exception(__name__, exc)
+
+  # ── Manuelle Logo-Suche (Fallback-Button im Logo-Frame) ──────────────
+
+  def _on_manual_logo_search_requested(self, context):
+    """Wird aufgerufen wenn der Nutzer manuell auf 'Logo suchen' klickt."""
+    if self._logo_search_worker is not None and self._logo_search_worker.isRunning():
+      msg = QMessageBox(self)
+      msg.setIcon(QMessageBox.Icon.Information)
+      msg.setWindowTitle("Logo-Suche")
+      msg.setText("Es laeuft bereits eine Logo-Suche im Hintergrund.")
+      msg.exec()
+      return
+    shop_name = str(context.get("canonical_shop_name", "") or "").strip()
+    sender_domain = str(context.get("sender_domain", "") or "").strip()
+    self.einkauf_form_widget.btn_logo_search.setEnabled(False)
+    self.einkauf_form_widget.btn_logo_search.setText("Logo suchen...")
+    self._logo_search_worker = ShopLogoSearchWorker(
+      self.settings_manager,
+      canonical_shop_name=shop_name,
+      sender_domain=sender_domain,
+      limit=6,
+    )
+    self._logo_search_worker.result_signal.connect(lambda r: self._on_logo_search_finished(r, shop_name))
+    self._logo_search_worker.error_signal.connect(self._on_logo_search_error)
+    self._logo_search_worker.start()
+
+  def _finish_logo_search_ui(self):
+    if hasattr(self, "einkauf_form_widget"):
+      self.einkauf_form_widget.btn_logo_search.setEnabled(True)
+      self.einkauf_form_widget.btn_logo_search.setText("Logo suchen")
+    self._logo_search_worker = None
+
+  def _on_logo_search_finished(self, result_dict, shop_name):
+    candidates = result_dict.get("candidates", []) if isinstance(result_dict, dict) else []
+    self._finish_logo_search_ui()
+    if not candidates:
+      msg = QMessageBox(self)
+      msg.setIcon(QMessageBox.Icon.Information)
+      msg.setWindowTitle("Logo-Suche")
+      msg.setText("Es wurden keine passenden Logos gefunden.")
+      msg.exec()
+      return
+    selected = MediaGridSelectionDialog.choose(shop_name or "Shop-Logo", candidates, search_type="Logo", parent=self)
+    if not selected:
+      return
+    image_url = str(selected.get("image_url", "") or selected.get("thumbnail_url", "") or "").strip()
+    if not image_url:
+      msg = QMessageBox(self)
+      msg.setIcon(QMessageBox.Icon.Warning)
+      msg.setWindowTitle("Logo-Suche")
+      msg.setText("Der gewaehlte Eintrag hat keine gueltige Bild-URL.")
+      msg.exec()
+      return
+    try:
+      import os
+      from module.database_manager import DatabaseManager
+      db = DatabaseManager(self.settings_manager)
+      media_service = MediaService(db)
+      result = media_service.register_remote_shop_logo(
+        shop_name=shop_name,
+        image_url=image_url,
+        source_module="modul_mail_scraper",
+        source_kind="manual_web_selection",
+        source_ref=str(selected.get("source_page_url", "") or "").strip(),
+      )
+      logo_path = ""
+      if isinstance(result, dict):
+        asset = result.get("asset") or {}
+        logo_path = str(asset.get("file_path", "") or "").strip()
+      if logo_path and hasattr(self, "einkauf_form_widget"):
+        abs_logo_path = LocalMediaStore().resolve_path(logo_path) if not os.path.isabs(logo_path) else logo_path
+        if abs_logo_path and os.path.exists(abs_logo_path):
+          logo_path = abs_logo_path
+        self.einkauf_form_widget.set_shop_logo_path(logo_path)
+      msg = QMessageBox(self)
+      msg.setIcon(QMessageBox.Icon.Information)
+      msg.setWindowTitle("Logo-Suche")
+      msg.setText(f"Logo fuer '{shop_name}' wurde gespeichert.")
+      msg.exec()
+    except Exception as exc:
+      log_exception(__name__, exc)
+      msg = QMessageBox(self)
+      msg.setIcon(QMessageBox.Icon.Warning)
+      msg.setWindowTitle("Logo-Suche")
+      msg.setText(f"Das Logo konnte nicht gespeichert werden:\n{exc}")
+      msg.exec()
+
+  def _on_logo_search_error(self, err_msg):
+    self._finish_logo_search_ui()
+    text = str(err_msg or "").strip() or "Unbekannter Fehler bei der Logo-Suche."
+    msg = QMessageBox(self)
+    msg.setIcon(QMessageBox.Icon.Warning)
+    msg.setWindowTitle("Logo-Suche")
+    msg.setText(f"Die Logo-Suche ist fehlgeschlagen:\n{text}")
+    msg.exec()
+
+  # ─────────────────────────────────────────────────────────────────────
+
   def _auto_prompt_mapping_for_index(self, idx):
     if idx != self.current_index:
       return
@@ -2770,9 +2913,6 @@ class ScraperReviewWizardDialog(QDialog):
         db=self._shared_db
       )
       self._shared_db = match_result.get("db", self._shared_db)
-
-      title, text = EinkaufPipeline.build_match_result_message(match_result)
-      QMessageBox.information(self, title, text)
 
       self._advance_to_next()
     except Exception as e:
