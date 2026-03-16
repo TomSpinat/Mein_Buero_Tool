@@ -274,7 +274,7 @@ class DashboardWindow(QMainWindow):
 
     def open_inbound(self):
         self.stacked_widget.setCurrentWidget(self.inbound_app)
-        self.inbound_app._load_pending_orders()
+        self.inbound_app._list_page.reload()
         self.title_lbl.setText("WARENEINGANG")
         self.btn_back.show()
 
