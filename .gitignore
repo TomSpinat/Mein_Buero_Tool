@@ -20,6 +20,8 @@ data/debug_logs/
 
 # Laufzeitdaten / heruntergeladene Medien
 data/media/products/
+data/media/shops/
+data/media/screenshots/
 
 # Claude Code Memory (lokale Notizen)
 .claude/

@@ -5,6 +5,7 @@ Normale Werte liegen in settings.json, geheime Werte im Windows-Anmeldespeicher.
 """
 
 from PyQt6.QtWidgets import (
+    QComboBox,
     QDialog,
     QHBoxLayout,
     QLabel,
@@ -96,6 +97,12 @@ class SettingsDialog(QDialog):
         self.btn_clear_api_key.clicked.connect(self._delete_api_key)
         self.lbl_api_secret_state = QLabel()
 
+        self.lbl_image_search_provider = QLabel("Bildsuche Provider:")
+        self.combo_image_search_provider = QComboBox()
+        self.combo_image_search_provider.addItem("Brave Search (empfohlen)", "brave")
+        self.combo_image_search_provider.addItem("Google Custom Search", "google")
+        self.combo_image_search_provider.currentIndexChanged.connect(self._on_image_provider_changed)
+
         self.lbl_product_image_api_key = QLabel("Bildsuche API Key:")
         self.entry_product_image_api_key = QLineEdit()
         self.entry_product_image_api_key.setEchoMode(QLineEdit.EchoMode.PasswordEchoOnEdit)
@@ -164,13 +171,19 @@ class SettingsDialog(QDialog):
         main_layout.addLayout(api_row)
         main_layout.addWidget(self.lbl_api_secret_state)
 
+        provider_row = QHBoxLayout()
+        provider_row.addWidget(self.lbl_image_search_provider)
+        provider_row.addWidget(self.combo_image_search_provider)
+        provider_row.addStretch()
+        main_layout.addLayout(provider_row)
+
         main_layout.addWidget(self.lbl_product_image_api_key)
         image_api_row = QHBoxLayout()
         image_api_row.addWidget(self.entry_product_image_api_key)
         image_api_row.addWidget(self.btn_clear_product_image_api_key)
         main_layout.addLayout(image_api_row)
         main_layout.addWidget(self.lbl_product_image_api_secret_state)
-        
+
         main_layout.addWidget(self.lbl_product_image_search_google_cx)
         main_layout.addWidget(self.entry_product_image_search_google_cx)
 
@@ -267,12 +280,25 @@ class SettingsDialog(QDialog):
         self.entry_db_name.setText(self.settings_manager.get("db_name", "buchhaltung"))
         
         self.entry_product_image_search_google_cx.setText(self.settings_manager.get("product_image_search_google_cx", ""))
+
+        # Provider-Dropdown setzen
+        current_provider = self.settings_manager.get("product_image_search_provider", "brave")
+        idx = self.combo_image_search_provider.findData(current_provider)
+        if idx >= 0:
+            self.combo_image_search_provider.setCurrentIndex(idx)
+        self._on_image_provider_changed()
+
         self._refresh_secret_states()
 
     def _delete_api_key(self):
         self.settings_manager.delete_secret("gemini_api_key")
         self._refresh_secret_states()
         QMessageBox.information(self, "Entfernt", "Der gespeicherte Gemini API Key wurde geloescht.")
+
+    def _on_image_provider_changed(self):
+        is_google = self.combo_image_search_provider.currentData() == "google"
+        self.lbl_product_image_search_google_cx.setVisible(is_google)
+        self.entry_product_image_search_google_cx.setVisible(is_google)
 
     def _delete_product_image_api_key(self):
         self.settings_manager.delete_secret("product_image_search_api_key")
@@ -392,13 +418,16 @@ class SettingsDialog(QDialog):
         self._set_test_busy(False)
 
     def save_settings(self):
+        selected_provider = self.combo_image_search_provider.currentData() or "brave"
         settings_dict = {
             "db_host": self.entry_db_host.text().strip(),
             "db_port": self.entry_db_port.text().strip() or "3306",
             "db_user": self.entry_db_user.text().strip(),
             "db_name": self.entry_db_name.text().strip(),
+            "product_image_search_provider": selected_provider,
+            "shop_logo_search_provider": selected_provider,
             "product_image_search_google_cx": self.entry_product_image_search_google_cx.text().strip(),
-            "shop_logo_search_google_cx": self.entry_product_image_search_google_cx.text().strip() # Shared CX
+            "shop_logo_search_google_cx": self.entry_product_image_search_google_cx.text().strip(),
         }
 
         api_key = self.entry_api_key.text().strip()

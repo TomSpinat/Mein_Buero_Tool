@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
     QTabWidget, QComboBox, QFileDialog
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QMimeData, QSize, QThread
-from PyQt6.QtGui import QPixmap, QImage, QClipboard
+from PyQt6.QtGui import QPixmap, QImage, QClipboard, QPainter
 import os
 import tempfile
 import shutil
@@ -28,9 +28,14 @@ from module.ean_service import EanService
 from module.ean_lookup_dialog import EanLookupDialog
 from module.ean_search_worker import EanLookupWorker
 from module.shop_logo_search_service import ShopLogoSearchService
+from module.shop_logo_search_worker import ShopLogoSearchWorker
 from module.product_image_search_service import ProductImageSearchService
+from module.product_image_search_worker import ProductImageSearchWorker
 from module.media.media_grid_selection_dialog import MediaGridSelectionDialog
 from module.media.media_keys import build_shop_key, build_product_key
+from module.media.media_service import MediaService
+
+from module.ui_media_pixmap import create_placeholder_pixmap, render_preview_pixmap
 
 from module.crash_logger import (
     AppError,
@@ -160,6 +165,9 @@ class OrderEntryApp(QWidget):
         self.ean_service = EanService(self.settings_manager)
         self.ean_lookup_worker = None
         self._pending_ean_lookup_context = None
+        self.logo_search_worker = None
+        self.product_image_search_worker = None
+        self._pending_image_search_context = None
         self.setWindowTitle("Order Entry (Scanner)")
         self.current_gemini_data = {} # Speichert das komplette Dictionary zur Verarbeitung
         self.scan_mode = "einkauf" # 'einkauf' oder 'verkauf'
@@ -284,7 +292,7 @@ class OrderEntryApp(QWidget):
         right_layout.addWidget(lbl_waren)
         
         self.table_waren = QTableWidget()
-        self.table_waren.setColumnCount(6) # +1 für Bild-Suche Button
+        self.table_waren.setColumnCount(7) # Bild + Produkt + Variante + EAN + Menge + Preis + Suchen
         # Erlaube dem Nutzer die Spaltenbreite manuell anzupassen
         self.table_waren.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.table_waren.horizontalHeader().setStretchLastSection(True) # Die letzte Spalte füllt den Rest auf
@@ -331,7 +339,6 @@ class OrderEntryApp(QWidget):
             fields = [
                 ("bestellnummer", "Bestellnummer:"),
                 ("kaufdatum", "Kaufdatum:"),
-                ("shop_name", "Shop-Name (Normiert):"),
                 ("bestell_email", "Bestell-Email:"),
                 ("tracking_nummer_einkauf", "Tracking Code:"),
                 ("sendungsstatus", "Sendungsstatus:"),
@@ -343,7 +350,28 @@ class OrderEntryApp(QWidget):
                 ("ust_satz", "USt.-Satz:"),
                 ("zahlungsart", "Zahlungsart (Normiert):")
             ]
-            self.table_waren.setHorizontalHeaderLabels(["Produkt", "Variante", "EAN", "Menge", "Stückpreis"])
+            self.table_waren.setHorizontalHeaderLabels(["Bild", "Produkt", "Variante", "EAN", "Menge", "Stückpreis", ""])
+
+            # Shop-Logo-Vorschau (Placeholder "?")
+            self.lbl_shop_logo = QLabel()
+            self.lbl_shop_logo.setFixedSize(52, 52)
+            self.lbl_shop_logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.lbl_shop_logo.setStyleSheet("QLabel { background-color: transparent; border: 1px solid #30374d; border-radius: 8px; }")
+            self.lbl_shop_logo.setPixmap(create_placeholder_pixmap("?", 48))
+
+            # Shop-Name-Zeile mit Logo-Vorschau und "Logo suchen"-Button
+            shop_le = QLineEdit()
+            shop_le.setPlaceholderText("Warte auf KI...")
+            self.inputs["shop_name"] = shop_le
+            shop_row = QHBoxLayout()
+            shop_row.setSpacing(6)
+            shop_row.addWidget(self.lbl_shop_logo)
+            shop_row.addWidget(shop_le, 1)
+            self.btn_logo_search = QPushButton("Logo suchen")
+            self.btn_logo_search.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.btn_logo_search.clicked.connect(self._start_logo_search)
+            shop_row.addWidget(self.btn_logo_search)
+            self.form_layout.addRow("Shop-Name (Normiert):", shop_row)
         else:
             fields = [
                 ("ticket_name", "Ticket-Name:"),
@@ -507,11 +535,25 @@ class OrderEntryApp(QWidget):
                 ean = self.ean_service.find_best_local_ean_by_name(produkt_name, str(item.get("varianten_info", "")))
 
             if self.scan_mode == "einkauf":
-                self.table_waren.setItem(row, 0, QTableWidgetItem(produkt_name))
-                self.table_waren.setItem(row, 1, QTableWidgetItem(str(item.get("varianten_info", ""))))
-                self.table_waren.setItem(row, 2, QTableWidgetItem(ean))
-                self.table_waren.setItem(row, 3, QTableWidgetItem(str(item.get("menge", "1"))))
-                self.table_waren.setItem(row, 4, QTableWidgetItem(str(item.get("ekp_brutto", "0.00"))))
+                # Spalte 0: Produktbild-Vorschau (Placeholder)
+                img_label = QLabel()
+                img_label.setFixedSize(42, 42)
+                img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                first_letter = (produkt_name[:1] or "P").upper()
+                img_label.setPixmap(create_placeholder_pixmap(first_letter, 38, background="#202233", foreground="#a9b1d6"))
+                img_label.setStyleSheet("QLabel { background-color: transparent; border: none; }")
+                self.table_waren.setCellWidget(row, 0, img_label)
+                self.table_waren.setRowHeight(row, 46)
+
+                self.table_waren.setItem(row, 1, QTableWidgetItem(produkt_name))
+                self.table_waren.setItem(row, 2, QTableWidgetItem(str(item.get("varianten_info", ""))))
+                self.table_waren.setItem(row, 3, QTableWidgetItem(ean))
+                self.table_waren.setItem(row, 4, QTableWidgetItem(str(item.get("menge", "1"))))
+                self.table_waren.setItem(row, 5, QTableWidgetItem(str(item.get("ekp_brutto", "0.00"))))
+                btn_img = QPushButton("Suchen")
+                btn_img.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn_img.clicked.connect(lambda checked, r=row: self._start_product_image_search(r))
+                self.table_waren.setCellWidget(row, 6, btn_img)
             else:
                 self.table_waren.setItem(row, 0, QTableWidgetItem(produkt_name))
                 self.table_waren.setItem(row, 1, QTableWidgetItem(ean))
@@ -533,12 +575,15 @@ class OrderEntryApp(QWidget):
 
         produkt_name = ""
         varianten_info = ""
-        ean_col = 2 if self.scan_mode == "einkauf" else 1
+        # Einkauf: Bild(0), Produkt(1), Variante(2), EAN(3) | Verkauf: Produkt(0), EAN(1)
+        name_col = 1 if self.scan_mode == "einkauf" else 0
+        var_col = 2 if self.scan_mode == "einkauf" else -1
+        ean_col = 3 if self.scan_mode == "einkauf" else 1
 
-        if self.table_waren.item(row, 0):
-            produkt_name = self.table_waren.item(row, 0).text().strip()
-        if self.scan_mode == "einkauf" and self.table_waren.item(row, 1):
-            varianten_info = self.table_waren.item(row, 1).text().strip()
+        if self.table_waren.item(row, name_col):
+            produkt_name = self.table_waren.item(row, name_col).text().strip()
+        if var_col >= 0 and self.table_waren.item(row, var_col):
+            varianten_info = self.table_waren.item(row, var_col).text().strip()
 
         if not produkt_name:
             CustomMsgBox.warning(self, "EAN Suche", "In der markierten Zeile fehlt der Produktname.")
@@ -623,6 +668,213 @@ class OrderEntryApp(QWidget):
         msg = str(err_msg or "").strip() or "Unbekannter Fehler bei der EAN-Suche."
         CustomMsgBox.warning(self, "EAN Suche", f"Die EAN-Suche ist fehlgeschlagen:\n{msg}")
 
+    # ── Shop-Logo-Suche (Google Custom Search API, 100 Gratis/Tag) ───
+
+    def _start_logo_search(self):
+        if self.logo_search_worker is not None and self.logo_search_worker.isRunning():
+            CustomMsgBox.information(self, "Logo-Suche", "Es laeuft bereits eine Logo-Suche im Hintergrund.")
+            return
+
+        shop_name = str(self.inputs.get("shop_name", QLineEdit()).text()).strip()
+        if not shop_name:
+            CustomMsgBox.information(self, "Logo-Suche", "Bitte zuerst einen Shop-Namen eintragen.")
+            return
+
+        sender_domain = ""
+        bestell_email = str(self.inputs.get("bestell_email", QLineEdit()).text()).strip()
+        if "@" in bestell_email:
+            sender_domain = bestell_email.split("@", 1)[1].strip().lower()
+
+        self.btn_logo_search.setEnabled(False)
+        self.btn_logo_search.setText("Logo suchen...")
+
+        self.logo_search_worker = ShopLogoSearchWorker(
+            self.settings_manager,
+            canonical_shop_name=shop_name,
+            sender_domain=sender_domain,
+            limit=6,
+        )
+        self.logo_search_worker.result_signal.connect(self._on_logo_search_finished)
+        self.logo_search_worker.error_signal.connect(self._on_logo_search_error)
+        self.logo_search_worker.start()
+
+    def _finish_logo_search_ui(self):
+        if hasattr(self, "btn_logo_search"):
+            self.btn_logo_search.setEnabled(True)
+            self.btn_logo_search.setText("Logo suchen")
+        self.logo_search_worker = None
+
+    def _on_logo_search_finished(self, result_dict):
+        candidates = result_dict.get("candidates", []) if isinstance(result_dict, dict) else []
+        shop_name = str(self.inputs.get("shop_name", QLineEdit()).text()).strip()
+        self._finish_logo_search_ui()
+
+        if not candidates:
+            CustomMsgBox.information(self, "Logo-Suche", "Es wurden keine passenden Logos gefunden.")
+            return
+
+        selected = MediaGridSelectionDialog.choose(
+            shop_name or "Shop-Logo",
+            candidates,
+            search_type="Logo",
+            parent=self,
+        )
+        if not selected:
+            return
+
+        image_url = str(selected.get("image_url", "") or selected.get("thumbnail_url", "") or "").strip()
+        if not image_url:
+            CustomMsgBox.warning(self, "Logo-Suche", "Der gewaehlte Eintrag hat keine gueltige Bild-URL.")
+            return
+
+        try:
+            db = DatabaseManager(self.settings_manager)
+            media_service = MediaService(db)
+            result = media_service.register_remote_shop_logo(
+                shop_name=shop_name,
+                image_url=image_url,
+                source_module="modul_order_entry",
+                source_kind="manual_web_selection",
+                source_ref=str(selected.get("source_page_url", "") or "").strip(),
+            )
+            # Logo-Vorschau aktualisieren
+            logo_path = ""
+            if isinstance(result, dict):
+                asset = result.get("asset") or {}
+                logo_path = str(asset.get("file_path", "") or "").strip()
+            if logo_path and hasattr(self, "lbl_shop_logo"):
+                logo_path = self._resolve_media_path(logo_path)
+                source_px = QPixmap(logo_path)
+                if not source_px.isNull():
+                    self.lbl_shop_logo.setPixmap(render_preview_pixmap(source_px, 48, background="#ffffff", radius=8, inset=2))
+            CustomMsgBox.information(self, "Logo-Suche", f"Logo fuer '{shop_name}' wurde gespeichert.")
+        except Exception as exc:
+            log_exception(__name__, exc)
+            CustomMsgBox.warning(self, "Logo-Suche", f"Das Logo konnte nicht gespeichert werden:\n{exc}")
+
+    def _on_logo_search_error(self, err_msg):
+        self._finish_logo_search_ui()
+        msg = str(err_msg or "").strip() or "Unbekannter Fehler bei der Logo-Suche."
+        CustomMsgBox.warning(self, "Logo-Suche", f"Die Logo-Suche ist fehlgeschlagen:\n{msg}")
+
+    # ── Produktbild-Suche (Google Custom Search API, 100 Gratis/Tag) ─
+
+    def _start_product_image_search(self, row):
+        if self.product_image_search_worker is not None and self.product_image_search_worker.isRunning():
+            CustomMsgBox.information(self, "Bildsuche", "Es laeuft bereits eine Bildsuche im Hintergrund.")
+            return
+
+        produkt_name = ""
+        varianten_info = ""
+        ean = ""
+
+        # Einkauf: Bild(0), Produkt(1), Variante(2), EAN(3) | Verkauf: Produkt(0), EAN(1)
+        name_col = 1 if self.scan_mode == "einkauf" else 0
+        var_col = 2 if self.scan_mode == "einkauf" else -1
+        ean_col = 3 if self.scan_mode == "einkauf" else 1
+
+        if self.table_waren.item(row, name_col):
+            produkt_name = self.table_waren.item(row, name_col).text().strip()
+        if var_col >= 0 and self.table_waren.item(row, var_col):
+            varianten_info = self.table_waren.item(row, var_col).text().strip()
+        if self.table_waren.item(row, ean_col):
+            ean = self.table_waren.item(row, ean_col).text().strip()
+
+        if not produkt_name:
+            CustomMsgBox.warning(self, "Bildsuche", "In der markierten Zeile fehlt der Produktname.")
+            return
+
+        self._pending_image_search_context = {
+            "row": row,
+            "produkt_name": produkt_name,
+            "varianten_info": varianten_info,
+            "ean": ean,
+        }
+
+        self.product_image_search_worker = ProductImageSearchWorker(
+            self.settings_manager,
+            produkt_name,
+            varianten_info=varianten_info,
+            ean=ean,
+            limit=6,
+        )
+        self.product_image_search_worker.result_signal.connect(self._on_product_image_search_finished)
+        self.product_image_search_worker.error_signal.connect(self._on_product_image_search_error)
+        self.product_image_search_worker.start()
+
+    def _on_product_image_search_finished(self, result_dict):
+        context = dict(self._pending_image_search_context or {})
+        self._pending_image_search_context = None
+        self.product_image_search_worker = None
+
+        candidates = result_dict.get("candidates", []) if isinstance(result_dict, dict) else []
+        produkt_name = str(context.get("produkt_name", "")).strip()
+
+        if not candidates:
+            CustomMsgBox.information(self, "Bildsuche", "Es wurden keine passenden Produktbilder gefunden.")
+            return
+
+        selected = MediaGridSelectionDialog.choose(
+            produkt_name or "Produktbild",
+            candidates,
+            search_type="Produktbild",
+            parent=self,
+        )
+        if not selected:
+            return
+
+        image_url = str(selected.get("image_url", "") or selected.get("thumbnail_url", "") or "").strip()
+        if not image_url:
+            CustomMsgBox.warning(self, "Bildsuche", "Der gewaehlte Eintrag hat keine gueltige Bild-URL.")
+            return
+
+        try:
+            db = DatabaseManager(self.settings_manager)
+            media_service = MediaService(db)
+            result = media_service.register_remote_product_image(
+                product_name=produkt_name,
+                image_url=image_url,
+                ean=str(context.get("ean", "") or "").strip(),
+                variant_text=str(context.get("varianten_info", "") or "").strip(),
+                source_module="modul_order_entry",
+                source_kind="manual_web_selection",
+                source_ref=str(selected.get("source_page_url", "") or "").strip(),
+            )
+            # Produktbild-Vorschau in der Tabelle aktualisieren
+            target_row = context.get("row", -1)
+            img_path = ""
+            if isinstance(result, dict):
+                asset = result.get("asset") or {}
+                img_path = str(asset.get("file_path", "") or "").strip()
+            if img_path and target_row >= 0:
+                img_path = self._resolve_media_path(img_path)
+                source_px = QPixmap(img_path)
+                if not source_px.isNull():
+                    img_label = self.table_waren.cellWidget(target_row, 0)
+                    if isinstance(img_label, QLabel):
+                        img_label.setPixmap(render_preview_pixmap(source_px, 38, background="#ffffff", radius=6, inset=2))
+            CustomMsgBox.information(self, "Bildsuche", f"Produktbild fuer '{produkt_name}' wurde gespeichert.")
+        except Exception as exc:
+            log_exception(__name__, exc)
+            CustomMsgBox.warning(self, "Bildsuche", f"Das Produktbild konnte nicht gespeichert werden:\n{exc}")
+
+    def _on_product_image_search_error(self, err_msg):
+        self._pending_image_search_context = None
+        self.product_image_search_worker = None
+        msg = str(err_msg or "").strip() or "Unbekannter Fehler bei der Bildsuche."
+        CustomMsgBox.warning(self, "Bildsuche", f"Die Bildsuche ist fehlgeschlagen:\n{msg}")
+
+    @staticmethod
+    def _resolve_media_path(rel_path):
+        """Loest einen relativen Media-Pfad zum absoluten Pfad auf."""
+        rel_path = str(rel_path or "").strip()
+        if not rel_path:
+            return ""
+        if os.path.isabs(rel_path):
+            return rel_path
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        return os.path.join(project_root, rel_path)
+
     def _reset_form(self):
         self.drop_box.current_pixmap = None
         self.drop_box.current_source_path = None
@@ -641,6 +893,15 @@ class OrderEntryApp(QWidget):
         self.btn_scan.setEnabled(False)
         self.btn_save_db.setEnabled(False)
 
+        # Image-Search Worker cleanup
+        self.logo_search_worker = None
+        self.product_image_search_worker = None
+        self._pending_image_search_context = None
+
+        # Logo-Vorschau auf Placeholder zuruecksetzen
+        if hasattr(self, "lbl_shop_logo"):
+            self.lbl_shop_logo.setPixmap(create_placeholder_pixmap("?", 48))
+
     def _save_to_database(self):
         # UI Änderungen zurück in das gemini dict spielen
         for db_key, line_edit in self.inputs.items():
@@ -652,11 +913,11 @@ class OrderEntryApp(QWidget):
         for r in range(rows):
             if self.scan_mode == "einkauf":
                 w = {
-                    "produkt_name": self.table_waren.item(r, 0).text(),
-                    "varianten_info": self.table_waren.item(r, 1).text(),
-                    "ean": self.table_waren.item(r, 2).text(),
-                    "menge": self.table_waren.item(r, 3).text(),
-                    "ekp_brutto": self.table_waren.item(r, 4).text()
+                    "produkt_name": self.table_waren.item(r, 1).text(),
+                    "varianten_info": self.table_waren.item(r, 2).text(),
+                    "ean": self.table_waren.item(r, 3).text(),
+                    "menge": self.table_waren.item(r, 4).text(),
+                    "ekp_brutto": self.table_waren.item(r, 5).text()
                 }
             else:
                 w = {

@@ -26,15 +26,15 @@
     "product_image_search_enabled": true,
     "product_image_search_provider": "brave",
     "product_image_search_api_url": "https://api.search.brave.com/res/v1/images/search",
-    "product_image_search_google_cx": "",
+    "product_image_search_google_cx": "95671900bc68049bd",
     "product_image_search_timeout_sec": 8,
-    "product_image_search_max_results": 3,
+    "product_image_search_max_results": 6,
     "shop_logo_search_enabled": true,
     "shop_logo_search_provider": "brave",
     "shop_logo_search_api_url": "https://api.search.brave.com/res/v1/images/search",
-    "shop_logo_search_google_cx": "",
+    "shop_logo_search_google_cx": "95671900bc68049bd",
     "shop_logo_search_timeout_sec": 8,
-    "shop_logo_search_max_results": 3,
+    "shop_logo_search_max_results": 6,
     "trusted_mail_senders": [
         "confirmation-commande@amazon.fr",
         "noreply@news.paypal.com",
@@ -56,5 +56,5 @@
         "amazon.it"
     ],
     "test_wipe_on_start": true,
-    "test_last_wipe_at": "2026-03-15 01:36:23"
+    "test_last_wipe_at": "2026-03-15 21:02:50"
 }
