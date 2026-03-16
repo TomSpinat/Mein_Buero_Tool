@@ -5,14 +5,18 @@ Normale Werte liegen in settings.json, geheime Werte im Windows-Anmeldespeicher.
 """
 
 from PyQt6.QtWidgets import (
+    QButtonGroup,
+    QCheckBox,
     QComboBox,
     QDialog,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
     QProgressBar,
+    QRadioButton,
     QVBoxLayout,
 )
 from PyQt6.QtCore import Qt
@@ -74,7 +78,7 @@ class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Einstellungen")
-        self.setFixedSize(620, 660)
+        self.setFixedSize(620, 820)
 
         self.settings_manager = SettingsManager()
         self._connection_test_task = None
@@ -150,6 +154,31 @@ class SettingsDialog(QDialog):
         self.progress_test.setTextVisible(False)
         self.progress_test.setFixedHeight(10)
 
+        # --- Buchhaltungseinstellungen ---
+        self.grp_buchhaltung = QGroupBox("Buchhaltungseinstellungen")
+
+        self.radio_kleinunternehmer = QRadioButton(
+            "Kleinunternehmer (§19 UStG) – keine Umsatzsteuer"
+        )
+        self.radio_regelbesteuerung = QRadioButton(
+            "Regelbesteuerung – Netto-/Bruttopreise trennen"
+        )
+        self.radio_kleinunternehmer.setChecked(True)
+
+        self.btn_group_steuer = QButtonGroup(self)
+        self.btn_group_steuer.addButton(self.radio_kleinunternehmer)
+        self.btn_group_steuer.addButton(self.radio_regelbesteuerung)
+        self.btn_group_steuer.buttonClicked.connect(self._on_steuer_modus_changed)
+
+        self.lbl_steuer_info = QLabel()
+        self.lbl_steuer_info.setWordWrap(True)
+        self.lbl_steuer_info.setStyleSheet("color: #9a9aaa; font-size: 11px; font-style: italic;")
+
+        self.lbl_ust_satz = QLabel("Standard-USt-Satz (%):")
+        self.entry_ust_satz = QLineEdit()
+        self.entry_ust_satz.setPlaceholderText("19")
+        self.entry_ust_satz.setFixedWidth(80)
+
         self.btn_test = QPushButton("Verbindungen testen")
         self.btn_test.clicked.connect(self.test_connections)
 
@@ -211,6 +240,23 @@ class SettingsDialog(QDialog):
         db_pass_row.addWidget(self.btn_clear_db_pass)
         main_layout.addLayout(db_pass_row)
         main_layout.addWidget(self.lbl_db_pass_state)
+
+        main_layout.addSpacing(10)
+
+        # --- Buchhaltung-GroupBox ---
+        buch_layout = QVBoxLayout()
+        buch_layout.addWidget(self.radio_kleinunternehmer)
+        buch_layout.addWidget(self.radio_regelbesteuerung)
+        buch_layout.addWidget(self.lbl_steuer_info)
+
+        ust_row = QHBoxLayout()
+        ust_row.addWidget(self.lbl_ust_satz)
+        ust_row.addWidget(self.entry_ust_satz)
+        ust_row.addStretch()
+        buch_layout.addLayout(ust_row)
+
+        self.grp_buchhaltung.setLayout(buch_layout)
+        main_layout.addWidget(self.grp_buchhaltung)
 
         main_layout.addSpacing(10)
 
@@ -288,7 +334,33 @@ class SettingsDialog(QDialog):
             self.combo_image_search_provider.setCurrentIndex(idx)
         self._on_image_provider_changed()
 
+        # Buchhaltungseinstellungen laden
+        steuer_modus = self.settings_manager.get("steuer_modus", "kleinunternehmer")
+        if steuer_modus == "regelbesteuerung":
+            self.radio_regelbesteuerung.setChecked(True)
+        else:
+            self.radio_kleinunternehmer.setChecked(True)
+
+        ust_satz = self.settings_manager.get("default_ust_satz", 19.0)
+        self.entry_ust_satz.setText(str(ust_satz))
+
+        self._on_steuer_modus_changed()
         self._refresh_secret_states()
+
+    def _on_steuer_modus_changed(self, _btn=None):
+        is_regel = self.radio_regelbesteuerung.isChecked()
+        if is_regel:
+            self.lbl_steuer_info.setText(
+                "Nettowerte werden aus Brutto \u00f7 (1 + USt) berechnet und separat gespeichert."
+            )
+            self.lbl_ust_satz.setEnabled(True)
+            self.entry_ust_satz.setEnabled(True)
+        else:
+            self.lbl_steuer_info.setText(
+                "Preise enthalten keine MwSt. Formeln arbeiten nur mit Bruttobetragen."
+            )
+            self.lbl_ust_satz.setEnabled(False)
+            self.entry_ust_satz.setEnabled(False)
 
     def _delete_api_key(self):
         self.settings_manager.delete_secret("gemini_api_key")
@@ -419,6 +491,12 @@ class SettingsDialog(QDialog):
 
     def save_settings(self):
         selected_provider = self.combo_image_search_provider.currentData() or "brave"
+        steuer_modus = "regelbesteuerung" if self.radio_regelbesteuerung.isChecked() else "kleinunternehmer"
+        try:
+            ust_satz_val = float(self.entry_ust_satz.text().replace(",", ".").strip() or "19")
+        except ValueError:
+            ust_satz_val = 19.0
+
         settings_dict = {
             "db_host": self.entry_db_host.text().strip(),
             "db_port": self.entry_db_port.text().strip() or "3306",
@@ -428,6 +506,8 @@ class SettingsDialog(QDialog):
             "shop_logo_search_provider": selected_provider,
             "product_image_search_google_cx": self.entry_product_image_search_google_cx.text().strip(),
             "shop_logo_search_google_cx": self.entry_product_image_search_google_cx.text().strip(),
+            "steuer_modus": steuer_modus,
+            "default_ust_satz": ust_satz_val,
         }
 
         api_key = self.entry_api_key.text().strip()

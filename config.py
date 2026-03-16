@@ -94,6 +94,11 @@ class SettingsManager:
             "trusted_mail_domains": [],
             "test_wipe_on_start": False,
             "test_last_wipe_at": "",
+            # --- Buchhaltungs-Modus ---
+            # "kleinunternehmer" = §19 UStG, keine MwSt, Brutto = Netto (default)
+            # "regelbesteuerung" = Netto/Brutto wird getrennt berechnet
+            "steuer_modus": "kleinunternehmer",
+            "default_ust_satz": 19.0,
         }
 
     def _queue_secret_warning(self, message):
@@ -324,6 +329,38 @@ class SettingsManager:
         self._delete_secret_value(key)
         self.settings[key] = ""
         self.save_settings({})
+
+    # ------------------------------------------------------------------
+    # Letzter genutzter Ordner pro Dialog (wird in settings.json gespeichert)
+    # ------------------------------------------------------------------
+    def get_last_dir(self, dialog_key: str, fallback: str = "") -> str:
+        """Gibt den zuletzt verwendeten Ordner für einen Datei-Dialog zurück.
+
+        Fallback-Kette: gespeicherter Pfad → Desktop → Home-Verzeichnis.
+        """
+        dirs: dict = self.settings.get("_last_dirs", {})
+        saved = dirs.get(dialog_key, "")
+        if saved and os.path.isdir(saved):
+            return saved
+        if not fallback:
+            desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+            fallback = desktop if os.path.isdir(desktop) else os.path.expanduser("~")
+        return fallback
+
+    def set_last_dir(self, dialog_key: str, file_path: str) -> None:
+        """Speichert den Ordner der gewählten Datei für diesen Dialog."""
+        folder = os.path.dirname(file_path)
+        if not folder or not os.path.isdir(folder):
+            return
+        plain_settings = self._read_plain_settings_file()
+        dirs = plain_settings.get("_last_dirs", {})
+        dirs[dialog_key] = folder
+        plain_settings["_last_dirs"] = dirs
+        self._write_plain_settings_file(plain_settings)
+        # Auch im Runtime-Cache aktualisieren
+        if "_last_dirs" not in self.settings:
+            self.settings["_last_dirs"] = {}
+        self.settings["_last_dirs"][dialog_key] = folder
 
 
 

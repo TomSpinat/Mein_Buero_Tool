@@ -30,9 +30,9 @@ class LoadingOverlay(QWidget):
         if self.parent():
             self.resize(self.parent().size())
             self.move(0, 0)
-            self.raise_()
         self.timer.start(50)
         self.show()
+        self.raise_()  # raise_() erst NACH show() – vorher hat es keine Wirkung
 
     def stop(self):
         self.timer.stop()

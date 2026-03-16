@@ -116,7 +116,7 @@ class PomsModule(QWidget):
         main_layout.addLayout(toolbar_layout)
 
         self.table = QTableWidget()
-        self.table.setColumnCount(12)
+        self.table.setColumnCount(13)
         self.table.setHorizontalHeaderLabels(
             [
                 "ID",
@@ -131,6 +131,7 @@ class PomsModule(QWidget):
                 "Order Status",
                 "Payment",
                 "Invoice",
+                "Zahlung am",
             ]
         )
 
@@ -232,6 +233,10 @@ class PomsModule(QWidget):
             self._build_status_combo(row_idx, order["id"], "inventory_status", POMS_ORDER_OPTIONS, order.get("inventory_status"))
             self._build_status_combo(row_idx, order["id"], "payment_status", POMS_PAYMENT_OPTIONS, order.get("payment_status"))
             self._build_status_combo(row_idx, order["id"], "invoice_status", POMS_INVOICE_OPTIONS, order.get("invoice_status"))
+
+            zahlung_datum = order.get("zahlungseingang_datum")
+            zahlung_str = zahlung_datum.strftime("%Y-%m-%d") if zahlung_datum else ""
+            self.table.setItem(row_idx, 12, self._make_item(zahlung_str))
 
         self.table.resizeColumnsToContents()
 

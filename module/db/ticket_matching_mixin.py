@@ -236,16 +236,35 @@ class TicketMatchingMixin:
         return matched_info, pending_units
 
     def _apply_ticket_matches(self, cursor, ticket_id, matched_info):
+        steuer_modus = self.settings.get("steuer_modus", "kleinunternehmer")
+
         for match in matched_info:
+            vk_brutto = self._to_float(match.get("vk_brutto", 0.0))
+            marge_gesamt = self._to_float(match.get("marge_gesamt", 0.0))
+
             update_sql = """
                 UPDATE waren_positionen
                 SET verkauf_ticket_id = %s, vk_brutto = %s, marge_gesamt = %s
             """
-            params = [
-                ticket_id,
-                self._to_float(match.get("vk_brutto", 0.0)),
-                self._to_float(match.get("marge_gesamt", 0.0))
-            ]
+            params = [ticket_id, vk_brutto, marge_gesamt]
+
+            if steuer_modus == "regelbesteuerung":
+                ust_satz_vk = self.settings.get("default_ust_satz", 19.0)
+                vk_netto = self._to_netto(vk_brutto, ust_satz_vk)
+
+                # Einstand netto aus DB lesen um Marge netto korrekt zu berechnen
+                cursor.execute(
+                    "SELECT einstand_netto, einstand_brutto FROM waren_positionen WHERE id = %s",
+                    (match["db_id"],)
+                )
+                pos_row = cursor.fetchone() or {}
+                einstand_netto = self._to_float(
+                    pos_row.get("einstand_netto") or pos_row.get("einstand_brutto", 0.0)
+                )
+                marge_netto = self._round_money(vk_netto - einstand_netto)
+
+                update_sql += ", vk_netto = %s, marge_netto = %s"
+                params += [vk_netto, marge_netto]
 
             match_ean = str(match.get("ean", "")).strip()
             if match_ean:
