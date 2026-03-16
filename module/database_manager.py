@@ -79,7 +79,9 @@ class DatabaseManager(
             'port': int(self.settings.get('db_port', '3306')),
             'user': self.settings.get('db_user', 'root'),
             'password': self.settings.get('db_pass', ''),
-            'use_pure': True  # WICHTIG: Verhindert C-Extension Crash mit PyQt6
+            'use_pure': True,        # WICHTIG: Verhindert C-Extension Crash mit PyQt6
+            'charset': 'utf8mb4',   # Zentrales Encoding: erzwingt UTF-8 für alle DB-Strings
+            'collation': 'utf8mb4_unicode_ci',
         }
         if include_db:
             config['database'] = self.settings.get('db_name', 'buchhaltung')

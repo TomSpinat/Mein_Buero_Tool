@@ -178,7 +178,8 @@ class PomsRepositoryMixin:
                     w.zahlungsstatus as payment_status,
                     w.buchhaltungsstatus as invoice_status,
                     IFNULL(a.tracking_nummer, e.tracking_nummer_einkauf) as tracking,
-                    t.ticket_name as notes
+                    t.ticket_name as notes,
+                    t.zahlungseingang_datum
                 FROM waren_positionen w
                 JOIN einkauf_bestellungen e ON w.einkauf_id = e.id
                 LEFT JOIN verkauf_tickets t ON w.verkauf_ticket_id = t.id
@@ -315,6 +316,26 @@ class PomsRepositoryMixin:
                 f"UPDATE waren_positionen SET {db_column} = %s WHERE id IN ({format_strings})",
                 tuple(params),
             )
+
+            # Phase 8: Bei Zahlung erhalten -> geld_erhalten + zahlungseingang_datum setzen
+            if normalized_field == "payment_status" and normalize_payment_status(value) == PaymentStatus.PAID:
+                cursor.execute(
+                    f"""
+                    UPDATE verkauf_tickets
+                    SET geld_erhalten = TRUE,
+                        zahlungseingang_datum = CASE
+                            WHEN zahlungseingang_datum IS NULL THEN CURDATE()
+                            ELSE zahlungseingang_datum
+                        END
+                    WHERE id IN (
+                        SELECT DISTINCT verkauf_ticket_id
+                        FROM waren_positionen
+                        WHERE id IN ({format_strings}) AND verkauf_ticket_id IS NOT NULL
+                    )
+                    """,
+                    tuple(clean_ids),
+                )
+
             conn.commit()
             cursor.close()
             return True

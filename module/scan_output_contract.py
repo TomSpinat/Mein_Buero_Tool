@@ -29,6 +29,7 @@ EINKAUF_FIELDS: Sequence[str] = (
     "nebenkosten_brutto",
     "rabatt_brutto",
     "ust_satz",
+    "reverse_charge",
     "zahlungsart",
     "waren",
     "screenshot_detections",
@@ -302,6 +303,7 @@ class ValidatedEinkaufOutput:
     nebenkosten_brutto: str = ""
     rabatt_brutto: str = ""
     ust_satz: str = ""
+    reverse_charge: bool = False
     zahlungsart: str = ""
     waren: List[Dict[str, str]] = field(default_factory=list)
     screenshot_detections: List[Dict[str, Any]] = field(default_factory=list)
@@ -322,6 +324,7 @@ class ValidatedEinkaufOutput:
             "nebenkosten_brutto": self.nebenkosten_brutto,
             "rabatt_brutto": self.rabatt_brutto,
             "ust_satz": self.ust_satz,
+            "reverse_charge": self.reverse_charge,
             "zahlungsart": self.zahlungsart,
             "waren": list(self.waren),
             "screenshot_detections": list(self.screenshot_detections),
@@ -397,6 +400,7 @@ def get_scan_output_schema(scan_mode: str) -> Dict[str, Any]:
             "nebenkosten_brutto": {"type": ["string", "number"]},
             "rabatt_brutto": {"type": ["string", "number"]},
             "ust_satz": {"type": ["string", "number"]},
+            "reverse_charge": {"type": "boolean"},
             "zahlungsart": {"type": "string"},
             "screenshot_detections": {
                 "type": "array",
@@ -495,6 +499,7 @@ def validate_and_normalize_output(scan_mode: str, payload: Any) -> ValidatedOutp
         nebenkosten_brutto=_normalize_money_text(source.get("nebenkosten_brutto", ""), "nebenkosten_brutto", mode),
         rabatt_brutto=_normalize_money_text(source.get("rabatt_brutto", ""), "rabatt_brutto", mode),
         ust_satz=_normalize_money_text(source.get("ust_satz", ""), "ust_satz", mode),
+        reverse_charge=bool(source.get("reverse_charge", False)),
         zahlungsart=_to_text(source.get("zahlungsart", ""), "zahlungsart", mode),
         waren=_parse_waren_list(source.get("waren", []), mode, verkauf=False),
         screenshot_detections=_parse_screenshot_detections(source.get("screenshot_detections", []), mode),

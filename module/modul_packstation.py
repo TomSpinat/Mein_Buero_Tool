@@ -75,6 +75,26 @@ class PackstationApp(QWidget):
         
         status_layout.addWidget(self.lbl_instruction)
         status_layout.addWidget(self.lbl_current_box)
+
+        # Porto-Eingabe (erscheint nach Tracking-Scan)
+        self.porto_frame = QFrame()
+        self.porto_frame.setStyleSheet("QFrame { background: transparent; border: none; }")
+        porto_layout = QHBoxLayout(self.porto_frame)
+        porto_layout.setContentsMargins(0, 4, 0, 0)
+        lbl_porto = QLabel("Versandkosten (Porto):")
+        lbl_porto.setStyleSheet("color: #a9b1d6; font-size: 13px; border: none;")
+        self.txt_porto = QLineEdit()
+        self.txt_porto.setPlaceholderText("0,00")
+        self.txt_porto.setFixedWidth(100)
+        self.txt_porto.setStyleSheet(
+            "QLineEdit { background-color: #24283b; color: #c0caf5; border: 1px solid #414868; border-radius: 4px; padding: 4px 8px; }"
+        )
+        porto_layout.addWidget(lbl_porto)
+        porto_layout.addWidget(self.txt_porto)
+        porto_layout.addStretch()
+        self.porto_frame.setVisible(False)
+        status_layout.addWidget(self.porto_frame)
+
         main_layout.addWidget(status_frame)
         
         # --- SCANNER EINGABE ---
@@ -110,19 +130,47 @@ class PackstationApp(QWidget):
         # Initialer Fokus
         QTimer.singleShot(500, self.txt_scanner.setFocus)
 
+    def _save_porto(self):
+        """Speichert die eingetragenen Versandkosten fuer das aktuelle Paket."""
+        if not self.current_paket_id:
+            return
+        try:
+            porto_text = self.txt_porto.text().strip().replace(",", ".")
+            porto_val = float(porto_text) if porto_text else 0.0
+        except ValueError:
+            porto_val = 0.0
+        if porto_val <= 0:
+            return
+        try:
+            conn = self.db._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE ausgangs_pakete SET versandkosten_ausgang = %s WHERE id = %s",
+                (porto_val, self.current_paket_id)
+            )
+            conn.commit()
+            cursor.close()
+            conn.close()
+        except Exception as exc:
+            log_exception(__name__, exc)
+
     def _reset_workflow(self):
-        """Setzt alles auf Anfang zurück für ein neues Paket"""
+        """Setzt alles auf Anfang zurueck fuer ein neues Paket"""
+        self._save_porto()
+
         self.scan_state = "WAITING_FOR_TRACKING"
         self.current_tracking = None
         self.current_paket_id = None
         self.current_item_id = None
         self.current_item_name = None
         self.scanned_items_in_box = []
-        
+
         self.lbl_instruction.setText("Schritt 1: Scanne die TRACKING-NUMMER vom Versandetikett des Pakets")
         self.lbl_instruction.setStyleSheet("font-size: 22px; font-weight: bold; color: #e0af68; border: none; padding: 10px;")
         self.lbl_current_box.setText("Aktuelles Paket: Keine Zuweisung")
-        
+        self.porto_frame.setVisible(False)
+        self.txt_porto.clear()
+
         self.table.setRowCount(0)
         self.txt_scanner.clear()
         self.txt_scanner.setFocus()
@@ -166,7 +214,8 @@ class PackstationApp(QWidget):
             
             self.current_tracking = tracking_code
             self.lbl_current_box.setText(f"Aktuelles Paket: {tracking_code} (Gespeichert in Datenbank)")
-            
+            self.porto_frame.setVisible(True)
+
             # Weiter zum nächsten Schritt
             self.scan_state = "WAITING_FOR_EAN"
             self.lbl_instruction.setText("Schritt 2: Scanne die EAN (Barcode) des Artikels, der ins Paket kommt")

@@ -6,11 +6,11 @@ Ersetzt die alte scanner_app.py und integriert die Normalisierungs-Schranke
 """
 
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
-    QPushButton, QLineEdit, QFormLayout, QFrame, 
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QPushButton, QLineEdit, QFormLayout, QFrame,
     QSizePolicy, QMessageBox, QApplication, QTextEdit,
     QTableWidget, QTableWidgetItem, QHeaderView, QRadioButton, QButtonGroup,
-    QTabWidget, QComboBox, QFileDialog
+    QTabWidget, QComboBox, QFileDialog, QMenu, QDialog, QDialogButtonBox, QSpinBox,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QMimeData, QSize, QThread
 from PyQt6.QtGui import QPixmap, QImage, QClipboard, QPainter
@@ -388,15 +388,18 @@ class OrderEntryApp(QWidget):
 
     def _upload_document(self):
         """Erlaubt das Auswaehlen einer Beleg-Datei aus einem Ordner (Bild oder PDF)."""
+        start_dir = self.settings_manager.get_last_dir("upload_beleg") if self.settings_manager else os.path.expanduser("~")
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Beleg-Datei auswaehlen",
-            os.path.expanduser("~"),
+            start_dir,
             "Belege (*.png *.jpg *.jpeg *.bmp *.webp *.pdf);;Bilddateien (*.png *.jpg *.jpeg *.bmp *.webp);;PDF Dateien (*.pdf);;Alle Dateien (*.*)"
         )
 
         if not file_path:
             return
+        if self.settings_manager:
+            self.settings_manager.set_last_dir("upload_beleg", file_path)
 
         ext = os.path.splitext(file_path)[1].lower()
         if ext == ".pdf":
@@ -1067,6 +1070,8 @@ class OrderEntryApp(QWidget):
         self.table_db.horizontalHeader().setStretchLastSection(True)
         self.table_db.verticalHeader().setDefaultSectionSize(35)
         self.table_db.itemChanged.connect(self._on_db_item_changed)
+        self.table_db.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table_db.customContextMenuRequested.connect(self._on_db_context_menu)
         self.db_layout.addWidget(self.table_db)
 
         self._loading_db = False
@@ -1093,12 +1098,37 @@ class OrderEntryApp(QWidget):
             self.table_db.setHorizontalHeaderLabels(columns)
             self.table_db.setRowCount(len(data))
             
+            menge_col = columns.index("menge") if "menge" in columns else -1
+            storno_menge_col = columns.index("storno_menge") if "storno_menge" in columns else -1
+
             for row, row_data in enumerate(data):
+                is_storniert = False
+                is_teilstorno = False
+                if table_name == "waren_positionen" and menge_col >= 0 and storno_menge_col >= 0:
+                    try:
+                        menge_val = int(row_data[menge_col] or 0)
+                        storno_val = int(row_data[storno_menge_col] or 0)
+                        if menge_val > 0 and storno_val >= menge_val:
+                            is_storniert = True
+                        elif storno_val > 0:
+                            is_teilstorno = True
+                    except Exception:
+                        pass
+
                 for col, value in enumerate(row_data):
                     item = QTableWidgetItem(str(value) if value is not None else "")
                     # Die ID sollte nicht editierbar sein
                     if columns[col] == "id":
                         item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                    if is_storniert:
+                        from PyQt6.QtGui import QFont, QBrush, QColor
+                        font = item.font()
+                        font.setStrikeOut(True)
+                        item.setFont(font)
+                        item.setForeground(QBrush(QColor("#f7768e")))
+                    elif is_teilstorno:
+                        from PyQt6.QtGui import QBrush, QColor
+                        item.setForeground(QBrush(QColor("#e0af68")))
                     self.table_db.setItem(row, col, item)
             
             self.table_db.resizeColumnsToContents()
@@ -1109,6 +1139,66 @@ class OrderEntryApp(QWidget):
             log_exception(__name__, e)
             self._loading_db = False
             CustomMsgBox.critical(self, "Fehler", f"Konnte Tabelle {table_name} nicht laden:\n{e}")
+
+    def _on_db_context_menu(self, pos):
+        if self.combo_table.currentText() != "waren_positionen":
+            return
+        item = self.table_db.itemAt(pos)
+        if item is None:
+            return
+
+        menu = QMenu(self)
+        action_storno = menu.addAction("Position stornieren...")
+        action = menu.exec(self.table_db.viewport().mapToGlobal(pos))
+
+        if action == action_storno:
+            self._storniere_position_fuer_zeile(item.row())
+
+    def _storniere_position_fuer_zeile(self, row):
+        columns = [self.table_db.horizontalHeaderItem(c).text() for c in range(self.table_db.columnCount())]
+        try:
+            position_id = int(self.table_db.item(row, columns.index("id")).text())
+            menge = int(self.table_db.item(row, columns.index("menge")).text() or 1)
+            storno_bisher = int(self.table_db.item(row, columns.index("storno_menge")).text() or 0) if "storno_menge" in columns else 0
+        except (ValueError, AttributeError):
+            CustomMsgBox.warning(self, "Storno", "Konnte Positionsdaten nicht lesen.")
+            return
+
+        offen = menge - storno_bisher
+        if offen <= 0:
+            CustomMsgBox.information(self, "Storno", "Diese Position ist bereits vollstaendig storniert.")
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Position stornieren")
+        layout = QVBoxLayout(dialog)
+
+        lbl = QLabel(f"Wie viele Einheiten sollen storniert werden?\n(max: {offen} von {menge})")
+        lbl.setWordWrap(True)
+        layout.addWidget(lbl)
+
+        spinbox = QSpinBox()
+        spinbox.setMinimum(1)
+        spinbox.setMaximum(offen)
+        spinbox.setValue(offen)
+        layout.addWidget(spinbox)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        neue_storno_menge = storno_bisher + spinbox.value()
+        try:
+            db = DatabaseManager(self.settings_manager)
+            db.storniere_waren_position(position_id, neue_storno_menge)
+            self._load_db_data()
+        except Exception as exc:
+            log_exception(__name__, exc)
+            CustomMsgBox.critical(self, "Storno-Fehler", f"Stornierung fehlgeschlagen:\n{exc}")
 
     def _on_db_item_changed(self, item):
         """Wird ausgelöst, sobald eine Zelle händisch bearbeitet wurde."""

@@ -7,6 +7,7 @@ from PyQt6.QtGui import QColor, QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QAbstractScrollArea,
+    QCheckBox,
     QDialog,
     QFileDialog,
     QFormLayout,
@@ -80,7 +81,7 @@ EINKAUF_ITEM_MAIN_COLUMNS = (
 )
 EINKAUF_ITEM_EDIT_KEYS = ("produkt_name", "varianten_info", "ean", "menge", "ekp_brutto")
 EINKAUF_ITEM_REVIEW_KEYS = EINKAUF_ITEM_EDIT_KEYS + ("bezugskosten_anteil_brutto", "einstand_brutto")
-EINKAUF_VISIBLE_FIELD_SET = set(EINKAUF_VISIBLE_FIELD_KEYS)
+EINKAUF_VISIBLE_FIELD_SET = set(EINKAUF_VISIBLE_FIELD_KEYS) | {"reverse_charge"}
 EINKAUF_TOP_LEVEL_ALLOWED = set(EINKAUF_FIELDS)
 NUMERIC_ITEM_KEYS = {"ekp_brutto", "bezugskosten_anteil_brutto", "einstand_brutto"}
 
@@ -835,6 +836,29 @@ class EinkaufHeadFormWidget(QWidget):
 
             layout.addWidget(frame)
 
+        # --- Reverse Charge Checkbox ---
+        rc_frame = QFrame()
+        rc_frame.setStyleSheet("QFrame { background-color: #24283b; border: 1px solid #414868; border-radius: 6px; }")
+        rc_frame_layout = QHBoxLayout(rc_frame)
+        rc_frame_layout.setContentsMargins(12, 8, 12, 8)
+        rc_frame_layout.setSpacing(8)
+
+        lbl_rc_icon = QLabel("\u26a0")
+        lbl_rc_icon.setStyleSheet("font-size: 16px; color: #e0af68;")
+        lbl_rc_icon.setToolTip("§13b UStG: Steuerschuldner ist der Leistungsempfaenger. Netto = Brutto.")
+        rc_frame_layout.addWidget(lbl_rc_icon)
+
+        self.chk_reverse_charge = QCheckBox("Reverse Charge (§13b UStG)")
+        self.chk_reverse_charge.setStyleSheet("color: #c0caf5; font-size: 12px;")
+        self.chk_reverse_charge.setToolTip(
+            "§13b UStG: Steuerschuldner ist der Leistungsempfaenger.\n"
+            "Wird automatisch angehakt wenn die KI einen entsprechenden Hinweis erkennt.\n"
+            "Kann manuell uebersteuert werden."
+        )
+        rc_frame_layout.addWidget(self.chk_reverse_charge)
+        rc_frame_layout.addStretch()
+        layout.addWidget(rc_frame)
+
         self.extra_frame = QFrame()
         self.extra_frame.setStyleSheet("QFrame { background-color: #202233; border: 1px solid #414868; border-radius: 6px; }")
         extra_layout = QVBoxLayout(self.extra_frame)
@@ -930,6 +954,7 @@ class EinkaufHeadFormWidget(QWidget):
         self._payload_context = dict(payload)
         for key in EINKAUF_VISIBLE_FIELD_KEYS:
             self.inputs[key].setText(str(payload.get(key, "") or ""))
+        self.chk_reverse_charge.setChecked(bool(payload.get("reverse_charge", False)))
         self._update_shop_preview(payload)
         self.set_extra_values(payload)
 
@@ -976,12 +1001,14 @@ class EinkaufHeadFormWidget(QWidget):
         updated = dict(payload or {})
         for key in EINKAUF_VISIBLE_FIELD_KEYS:
             updated[key] = self.inputs[key].text().strip()
+        updated["reverse_charge"] = self.chk_reverse_charge.isChecked()
         return updated
 
     def clear_values(self):
         self._payload_context = {}
         for key in EINKAUF_VISIBLE_FIELD_KEYS:
             self.inputs[key].clear()
+        self.chk_reverse_charge.setChecked(False)
         self._clear_extra_rows()
         self.extra_frame.setVisible(False)
         self.shop_preview_frame.setVisible(False)
@@ -1537,14 +1564,17 @@ class OrderItemImageManagerWidget(QFrame):
         if self._media_service is None:
             QMessageBox.information(self, "Bildpflege", "Die Medienverwaltung ist in diesem Moment nicht verfuegbar.")
             return
+        start_dir = self._settings_manager.get_last_dir("upload_bild") if self._settings_manager else os.path.expanduser("~")
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Lokales Bild fuer diese Position auswaehlen",
-            os.path.expanduser("~"),
+            start_dir,
             "Bilder (*.png *.jpg *.jpeg *.bmp *.webp *.gif);;Alle Dateien (*.*)"
         )
         if not file_path:
             return
+        if self._settings_manager:
+            self._settings_manager.set_last_dir("upload_bild", file_path)
         try:
             candidate = self._media_service.register_manual_item_candidate_from_file(
                 product_name=str(self._item.get("produkt_name", "") or "").strip(),

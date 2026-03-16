@@ -114,6 +114,18 @@ class SchemaManagementMixin:
                 cursor_db.execute("ALTER TABLE einkauf_bestellungen ADD COLUMN einstand_gesamt_brutto DECIMAL(10,2) DEFAULT 0")
             except Error:
                 pass
+            try:
+                cursor_db.execute("ALTER TABLE einkauf_bestellungen ADD COLUMN reverse_charge BOOLEAN DEFAULT FALSE")
+            except Error:
+                pass
+            try:
+                cursor_db.execute("ALTER TABLE einkauf_bestellungen ADD COLUMN storno_status VARCHAR(20) DEFAULT 'aktiv'")
+            except Error:
+                pass
+            try:
+                cursor_db.execute("ALTER TABLE einkauf_bestellungen ADD COLUMN einstand_gesamt_netto DECIMAL(10,2)")
+            except Error:
+                pass
 
             cursor_db.execute(
                 f"""
@@ -149,6 +161,10 @@ class SchemaManagementMixin:
                 )
             except Error:
                 pass
+            try:
+                cursor_db.execute("ALTER TABLE verkauf_tickets ADD COLUMN zahlungseingang_datum DATE")
+            except Error:
+                pass
 
             cursor_db.execute(
                 f"""
@@ -176,6 +192,10 @@ class SchemaManagementMixin:
                 cursor_db.execute(
                     f"ALTER TABLE ausgangs_pakete ADD COLUMN sendungsstatus VARCHAR(50) DEFAULT '{default_shipment_status}'"
                 )
+            except Error:
+                pass
+            try:
+                cursor_db.execute("ALTER TABLE ausgangs_pakete ADD COLUMN versandkosten_ausgang DECIMAL(10,2) DEFAULT 0")
             except Error:
                 pass
 
@@ -232,6 +252,30 @@ class SchemaManagementMixin:
                 pass
             try:
                 cursor_db.execute("ALTER TABLE waren_positionen ADD COLUMN einstand_brutto DECIMAL(10,2)")
+            except Error:
+                pass
+            try:
+                cursor_db.execute("ALTER TABLE waren_positionen ADD COLUMN ust_satz_ekp DECIMAL(5,2)")
+            except Error:
+                pass
+            try:
+                cursor_db.execute("ALTER TABLE waren_positionen ADD COLUMN einstand_netto DECIMAL(10,2)")
+            except Error:
+                pass
+            try:
+                cursor_db.execute("ALTER TABLE waren_positionen ADD COLUMN vk_netto DECIMAL(10,2)")
+            except Error:
+                pass
+            try:
+                cursor_db.execute("ALTER TABLE waren_positionen ADD COLUMN marge_netto DECIMAL(10,2)")
+            except Error:
+                pass
+            try:
+                cursor_db.execute("ALTER TABLE waren_positionen ADD COLUMN reverse_charge BOOLEAN DEFAULT FALSE")
+            except Error:
+                pass
+            try:
+                cursor_db.execute("ALTER TABLE waren_positionen ADD COLUMN storno_menge INT DEFAULT 0")
             except Error:
                 pass
 

@@ -8,6 +8,12 @@ from module.status_model import ShipmentStatus, shipment_db_value
 from module.module1_trace_logger import write_module1_trace
 
 class OrderProcessingMixin:
+    def _to_netto(self, brutto: float, ust_satz_pct: float) -> float:
+        """Nettowert aus Bruttowert. Bei Kleinunternehmer (ust_satz_pct=0): brutto == netto."""
+        if ust_satz_pct and ust_satz_pct > 0:
+            return self._round_money(brutto / (1 + ust_satz_pct / 100))
+        return brutto
+
     def _calculate_order_costs(self, data_dict, unit_rows):
         """
         Berechnet Warenwert, Bezugskosten und Einstandskosten.
@@ -74,19 +80,36 @@ class OrderProcessingMixin:
         if distributed and abs(rounding_delta) > 0:
             distributed[-1] = self._round_money(distributed[-1] + rounding_delta)
 
+        steuer_modus = self.settings.get("steuer_modus", "kleinunternehmer")
+        is_reverse_charge = bool(data_dict.get("reverse_charge", False))
+        ust_satz = self._to_float(
+            data_dict.get("ust_satz") or self.settings.get("default_ust_satz", 19.0)
+        )
+        netto_ust = 0.0 if (steuer_modus != "regelbesteuerung" or is_reverse_charge) else ust_satz
+
         for idx, row in enumerate(unit_rows):
             bezugskosten_anteil = distributed[idx] if idx < len(distributed) else 0.0
             row["bezugskosten_anteil_brutto"] = self._round_money(bezugskosten_anteil)
             row["einstand_brutto"] = self._round_money(
                 self._to_float(row.get("ekp_brutto", 0.0)) + bezugskosten_anteil
             )
+            row["ust_satz_ekp"] = ust_satz
+            row["reverse_charge"] = is_reverse_charge
+            if steuer_modus == "regelbesteuerung":
+                row["einstand_netto"] = self._to_netto(row["einstand_brutto"], netto_ust)
+            else:
+                row["einstand_netto"] = row["einstand_brutto"]
+
+        einstand_gesamt_netto = self._to_netto(einstand_gesamt, netto_ust)
 
         return {
             "warenwert_brutto": warenwert_brutto,
             "versandkosten_brutto": versand,
             "nebenkosten_brutto": neben,
             "rabatt_brutto": rabatt,
-            "einstand_gesamt_brutto": einstand_gesamt
+            "einstand_gesamt_brutto": einstand_gesamt,
+            "einstand_gesamt_netto": einstand_gesamt_netto,
+            "reverse_charge": is_reverse_charge,
         }
 
     def _enrich_existing_order_positions(self, cursor, einkauf_id, unit_rows):
@@ -366,9 +389,11 @@ class OrderProcessingMixin:
                 bestellnummer, kaufdatum, shop_name, bestell_email,
                 tracking_nummer_einkauf, paketdienst, lieferdatum, sendungsstatus,
                 gesamt_ekp_brutto, warenwert_brutto, versandkosten_brutto,
-                nebenkosten_brutto, rabatt_brutto, einstand_gesamt_brutto, ust_satz
+                nebenkosten_brutto, rabatt_brutto, einstand_gesamt_brutto, ust_satz,
+                reverse_charge, storno_status, einstand_gesamt_netto
             ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s
             )
             ON DUPLICATE KEY UPDATE
                 kaufdatum = IF(VALUES(kaufdatum) IS NOT NULL, VALUES(kaufdatum), kaufdatum),
@@ -384,7 +409,9 @@ class OrderProcessingMixin:
                 nebenkosten_brutto = IF(VALUES(nebenkosten_brutto) > 0, VALUES(nebenkosten_brutto), nebenkosten_brutto),
                 rabatt_brutto = IF(VALUES(rabatt_brutto) > 0, VALUES(rabatt_brutto), rabatt_brutto),
                 einstand_gesamt_brutto = IF(VALUES(einstand_gesamt_brutto) > 0, VALUES(einstand_gesamt_brutto), einstand_gesamt_brutto),
-                ust_satz = IF(VALUES(ust_satz) > 0, VALUES(ust_satz), ust_satz)
+                ust_satz = IF(VALUES(ust_satz) > 0, VALUES(ust_satz), ust_satz),
+                reverse_charge = VALUES(reverse_charge),
+                einstand_gesamt_netto = IF(VALUES(einstand_gesamt_netto) > 0, VALUES(einstand_gesamt_netto), einstand_gesamt_netto)
             """
 
             kaufdatum = data_dict.get("kaufdatum") or None
@@ -412,7 +439,10 @@ class OrderProcessingMixin:
                 self._round_money(kosten_meta.get("nebenkosten_brutto", 0.0)),
                 self._round_money(kosten_meta.get("rabatt_brutto", 0.0)),
                 self._round_money(kosten_meta.get("einstand_gesamt_brutto", 0.0)),
-                self._to_float(data_dict.get("ust_satz", 0.0))
+                self._to_float(data_dict.get("ust_satz", 0.0)),
+                bool(kosten_meta.get("reverse_charge", False)),
+                "aktiv",
+                self._round_money(kosten_meta.get("einstand_gesamt_netto", 0.0)),
             ))
 
             cursor.execute("SELECT id FROM einkauf_bestellungen WHERE bestellnummer = %s", (bestellnummer,))
@@ -441,9 +471,10 @@ class OrderProcessingMixin:
                     insert_sql = """
                         INSERT INTO waren_positionen (
                             einkauf_id, produkt_name, varianten_info, ean, menge,
-                            ekp_brutto, bezugskosten_anteil_brutto, einstand_brutto
+                            ekp_brutto, bezugskosten_anteil_brutto, einstand_brutto,
+                            ust_satz_ekp, einstand_netto, reverse_charge
                         ) VALUES (
-                            %s, %s, %s, %s, 1, %s, %s, %s
+                            %s, %s, %s, %s, 1, %s, %s, %s, %s, %s, %s
                         )
                     """
 
@@ -455,7 +486,10 @@ class OrderProcessingMixin:
                             row["ean"],
                             self._round_money(row.get("ekp_brutto", 0.0)),
                             self._round_money(row.get("bezugskosten_anteil_brutto", 0.0)),
-                            self._round_money(row.get("einstand_brutto", 0.0))
+                            self._round_money(row.get("einstand_brutto", 0.0)),
+                            row.get("ust_satz_ekp"),
+                            self._round_money(row.get("einstand_netto") or row.get("einstand_brutto", 0.0)),
+                            bool(row.get("reverse_charge", False)),
                         ))
                 else:
                     # Bereits verknuepfte Positionen bleiben erhalten; neue Dokumente ergaenzen nur fehlende Werte.
@@ -501,6 +535,84 @@ class OrderProcessingMixin:
                     cursor.close()
                 conn.close()
 
+
+    def storniere_waren_position(self, position_id: int, storno_menge: int) -> dict:
+        """
+        Setzt storno_menge fuer eine Position.
+        Wenn storno_menge == menge: Position und Bestellung auf 'storniert'.
+        Wenn storno_menge < menge: auf 'teilstorno'.
+        """
+        conn = self._get_connection()
+        if not conn.is_connected():
+            raise Exception("Keine aktive Verbindung zur Datenbank.")
+        cursor = None
+        try:
+            cursor = conn.cursor(dictionary=True)
+
+            cursor.execute(
+                "SELECT id, menge, storno_menge, einkauf_id FROM waren_positionen WHERE id = %s",
+                (position_id,)
+            )
+            pos = cursor.fetchone()
+            if not pos:
+                raise Exception(f"Position {position_id} nicht gefunden.")
+
+            menge = int(pos.get("menge") or 1)
+            storno_menge = max(0, min(storno_menge, menge))
+
+            if storno_menge == menge:
+                pos_storno_status = "storniert"
+            elif storno_menge > 0:
+                pos_storno_status = "teilstorno"
+            else:
+                pos_storno_status = "aktiv"
+
+            cursor.execute(
+                "UPDATE waren_positionen SET storno_menge = %s WHERE id = %s",
+                (storno_menge, position_id)
+            )
+
+            einkauf_id = pos.get("einkauf_id")
+            if einkauf_id:
+                cursor.execute(
+                    """
+                    SELECT SUM(menge) AS total_menge, SUM(storno_menge) AS total_storno
+                    FROM waren_positionen WHERE einkauf_id = %s
+                    """,
+                    (einkauf_id,)
+                )
+                agg = cursor.fetchone() or {}
+                total_menge = int(agg.get("total_menge") or 0)
+                total_storno = int(agg.get("total_storno") or 0)
+                if total_menge > 0 and total_storno >= total_menge:
+                    bestell_storno_status = "storniert"
+                elif total_storno > 0:
+                    bestell_storno_status = "teilstorno"
+                else:
+                    bestell_storno_status = "aktiv"
+
+                cursor.execute(
+                    "UPDATE einkauf_bestellungen SET storno_status = %s WHERE id = %s",
+                    (bestell_storno_status, einkauf_id)
+                )
+
+            conn.commit()
+            return {
+                "position_id": position_id,
+                "storno_menge": storno_menge,
+                "menge": menge,
+                "storno_status": pos_storno_status,
+            }
+        except Exception as exc:
+            log_exception(__name__, exc)
+            if conn:
+                conn.rollback()
+            raise Exception(f"Fehler beim Stornieren: {exc}")
+        finally:
+            if conn and conn.is_connected():
+                if cursor:
+                    cursor.close()
+                conn.close()
 
     def preview_order_enrichment(self, data_dict, max_lines=12):
         bestellnummer = str(data_dict.get("bestellnummer", "")).strip()

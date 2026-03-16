@@ -8,6 +8,21 @@ spielen Sound ab, und blenden dann nach der Sound-Länge weich zum Hauptdashboar
 """
 
 import sys
+import io
+
+# --- Zentrales UTF-8 Encoding für Windows ---
+# Auf Windows ist der Default-Encoding oft cp1252, was deutsche Umlaute in
+# print()-Ausgaben und Crash-Logs zerstört (Mojibake: ä→Ã¤).
+# Muss VOR allen anderen Imports passieren, damit alle Module UTF-8 erben.
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except AttributeError:
+        # Fallback für ältere Python-Versionen ohne reconfigure()
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
 from PyQt6.QtWidgets import QApplication, QSplashScreen, QWidget, QMainWindow, QLabel, QVBoxLayout, QMessageBox
 from PyQt6.QtGui import QPixmap, QPainter, QFontDatabase, QColor, QFont, QIcon
 from PyQt6.QtCore import Qt, QTimer, QUrl, QPropertyAnimation, QObject, pyqtProperty
@@ -138,15 +153,15 @@ class IntroSplashScreen(QWidget):
 
     def launch_dashboard(self):
         """Diese Funktion wird von der Animation aufgerufen, wenn sie fertig ist (alles schwarz ist)"""
-        # 1. ZUERST das Dashboard öffnen, damit immer ein Fenster für Qt aktiv ist 
+        # 1. ZUERST das Dashboard öffnen, damit immer ein Fenster für Qt aktiv ist
         #    (Sonst denkt Qt, die App soll beendet werden, weil kurz 0 Fenster offen sind!)
         self.dashboard = DashboardWindow(self.settings_manager)
         self.dashboard.show()
-        self.dashboard.raise_()
-        self.dashboard.activateWindow()
-        
-        # 2. DANN das Intro-Fenster schließen
-        self.close()
+
+        # 2. Intro-Fenster erst schliessen NACHDEM der erste Dashboard-Frame gezeichnet
+        #    wurde (QTimer 0ms = naechster Event-Loop-Durchlauf).
+        #    Verhindert den kurzen Desktop-Blitz beim uebergang Intro → Dashboard.
+        QTimer.singleShot(0, self.close)
 
 
 def main():

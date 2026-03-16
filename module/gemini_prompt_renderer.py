@@ -312,6 +312,12 @@ Tracking und Versand:
 17) Tracking darf nicht leer bleiben, wenn eine Quelle klare Tracking-Hinweise hat, auch falls die andere Quelle dazu nichts enthaelt.
 18) Versanddaten, Status und Lieferhinweise komplementaer aus Primaer- und Zusatzquelle nutzen, ohne etwas zu erfinden.
 
+Steuer / Reverse Charge:
+18a) Setze reverse_charge = true, wenn die Rechnung einen der folgenden Hinweise traegt:
+     "§13b UStG", "Steuerschuldnerschaft des Leistungsempfaengers", "Reverse Charge",
+     "VAT: 0%" kombiniert mit einem erkennbaren EU-Absender, oder vergleichbare Formulierungen.
+     In allen anderen Faellen: reverse_charge = false.
+
 {screenshot_guidance}
 
 Quellkombination:
