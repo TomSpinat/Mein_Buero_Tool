@@ -2059,6 +2059,44 @@ class EinkaufItemsTableWidget(QWidget):
         if context:
             self.eanLookupRequested.emit(context)
 
+    def add_empty_row(self):
+        """Fuegt eine leere Artikelzeile hinzu (fuer manuelle Eingabe in Modul 1)."""
+        self._items.append({
+            "produkt_name": "",
+            "varianten_info": "",
+            "ean": "",
+            "menge": 1,
+            "ekp_brutto": 0.0,
+        })
+        self._rebuild_table(select_source_index=len(self._items) - 1)
+
+    def delete_selected_rows(self):
+        """Loescht die aktuell markierte Zeile aus der Artikelliste."""
+        visual_row = self.table.currentRow()
+        info = self._visual_row_info(visual_row)
+        if not info:
+            return
+        source_index = info.get("source_row_index", -1)
+        if 0 <= source_index < len(self._items):
+            del self._items[source_index]
+            self._review_rows.pop(source_index, None)
+            self._expanded_rows.pop(source_index, None)
+            self._draft_image_states.pop(source_index, None)
+            # Reindex remaining review/expanded rows
+            self._review_rows = {
+                (k if k < source_index else k - 1): v
+                for k, v in self._review_rows.items()
+            }
+            self._expanded_rows = {
+                (k if k < source_index else k - 1): v
+                for k, v in self._expanded_rows.items()
+            }
+            self._draft_image_states = {
+                (k if k < source_index else k - 1): v
+                for k, v in self._draft_image_states.items()
+            }
+            self._rebuild_table()
+
     def clear_items(self):
         self._items = []
         self._review_rows = {}

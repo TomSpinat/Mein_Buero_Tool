@@ -2443,21 +2443,23 @@ class ScraperReviewWizardDialog(QDialog):
     self.lbl_stats.setText(" | ".join(parts))
 
   def _set_mapping_panel_collapsed(self, collapsed):
-    """Klappt das rechte Mapping-Panel ein/aus und verteilt den Platz um."""
+    """Klappt das rechte Mapping-Panel komplett ein/aus und verteilt den Platz um."""
     sizes = self.content_splitter.sizes()
     if len(sizes) < 3:
       return
     total = sum(sizes)
     if collapsed:
-      # Mapping-Panel einklappen: nur Status-Zeile + Button sichtbar
-      mapping_min = 180
-      remaining = total - mapping_min
-      self.content_splitter.setSizes([remaining // 2, remaining - remaining // 2, mapping_min])
-      self.mapping_panel_widget.setMaximumWidth(200)
+      # Mapping-Panel komplett ausblenden – Platz geht an Mail-Vorschau + Formular
       self.lbl_mapping_side_hint.setVisible(False)
       self.mapping_frame.setVisible(False)
+      self.mapping_panel_widget.setMinimumWidth(0)
+      self.mapping_panel_widget.setMaximumWidth(0)
+      self.mapping_panel_widget.setVisible(False)
+      half = total // 2
+      self.content_splitter.setSizes([half, total - half, 0])
     else:
       # Mapping-Panel aufklappen
+      self.mapping_panel_widget.setVisible(True)
       self.mapping_panel_widget.setMaximumWidth(420)
       self.mapping_panel_widget.setMinimumWidth(300)
       self.lbl_mapping_side_hint.setVisible(True)

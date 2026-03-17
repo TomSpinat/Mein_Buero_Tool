@@ -47,7 +47,7 @@ from module.crash_logger import (
 from module.lookup_service import LookupService
 from module.lookup_results import FieldState, FieldType, LookupSource
 from module.field_lookup_binding import FieldLookupBinding, create_bindings
-from module.einkauf_ui import EinkaufHeadFormWidget, set_field_state
+from module.einkauf_ui import EinkaufHeadFormWidget, EinkaufItemsTableWidget, SummenBannerWidget, set_field_state
 class GeminiWorker(QThread):
     finished_signal = pyqtSignal(dict)
     error_signal = pyqtSignal(str)
@@ -315,7 +315,7 @@ class OrderEntryApp(QWidget):
         self.form_layout_frame.setVisible(False)
         right_layout.addWidget(self.form_layout_frame)
 
-        # Tabelle für Warenpositionen (Einkauf oder Verkauf)
+        # --- Artikel-Header (gemeinsam fuer Einkauf + Verkauf) ---
         waren_header_row = QHBoxLayout()
         lbl_waren = QLabel("<h3>3. Erfasste Artikel</h3>")
         waren_header_row.addWidget(lbl_waren)
@@ -343,12 +343,21 @@ class OrderEntryApp(QWidget):
 
         right_layout.addLayout(waren_header_row)
 
+        # --- EinkaufItemsTableWidget fuer Einkauf-Modus (gleiche UI wie Modul 2) ---
+        self.einkauf_items_widget = EinkaufItemsTableWidget(self)
+        self.einkauf_items_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.einkauf_items_widget.table.setMinimumHeight(240)
+        self.einkauf_items_widget.eanLookupRequested.connect(lambda _ctx: self._lookup_ean_for_selected_row())
+        self.einkauf_items_widget.imageSearchRequested.connect(self._on_items_image_search_requested)
+        right_layout.addWidget(self.einkauf_items_widget)
+
+        # --- Legacy QTableWidget fuer Verkauf-Modus ---
         self.table_waren = QTableWidget()
-        self.table_waren.setColumnCount(7) # Bild + Produkt + Variante + EAN + Menge + Preis + Suchen
-        # Erlaube dem Nutzer die Spaltenbreite manuell anzupassen
+        self.table_waren.setColumnCount(5)
         self.table_waren.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.table_waren.horizontalHeader().setStretchLastSection(True) # Die letzte Spalte füllt den Rest auf
-        self.table_waren.verticalHeader().setDefaultSectionSize(45) # Größer wegen dem QLineEdit Padding
+        self.table_waren.horizontalHeader().setStretchLastSection(True)
+        self.table_waren.verticalHeader().setDefaultSectionSize(45)
+        self.table_waren.setVisible(False)
         right_layout.addWidget(self.table_waren)
 
         ean_row = QHBoxLayout()
@@ -357,30 +366,19 @@ class OrderEntryApp(QWidget):
         self.btn_ean_lookup.clicked.connect(self._lookup_ean_for_selected_row)
         ean_row.addWidget(self.btn_ean_lookup)
         ean_row.addStretch()
-        right_layout.addLayout(ean_row)
+        self._ean_legacy_row_widget = QWidget()
+        self._ean_legacy_row_widget.setLayout(ean_row)
+        self._ean_legacy_row_widget.setVisible(False)
+        right_layout.addWidget(self._ean_legacy_row_widget)
 
-        # Summen-Banner (berechnet vs. KI-Gesamtpreis)
-        self.summen_frame = QFrame()
-        self.summen_frame.setStyleSheet(
-            "QFrame { background-color: #1f2335; border: 1px solid #414868; border-radius: 6px; padding: 4px 8px; }"
-        )
-        summen_layout = QHBoxLayout(self.summen_frame)
-        summen_layout.setContentsMargins(8, 4, 8, 4)
-        summen_layout.setSpacing(12)
-        self.lbl_summe_berechnet = QLabel("Berechnet: --")
-        self.lbl_summe_berechnet.setStyleSheet("color: #c0caf5; font-size: 12px; border: none;")
-        summen_layout.addWidget(self.lbl_summe_berechnet)
-        self.lbl_summe_ki = QLabel("KI-Gesamtpreis: --")
-        self.lbl_summe_ki.setStyleSheet("color: #a9b1d6; font-size: 12px; border: none;")
-        summen_layout.addWidget(self.lbl_summe_ki)
-        self.lbl_summe_warnung = QLabel("")
-        self.lbl_summe_warnung.setStyleSheet("color: #f7c66f; font-size: 12px; border: none;")
-        summen_layout.addWidget(self.lbl_summe_warnung)
-        summen_layout.addStretch()
-        self.summen_frame.setVisible(False)
-        right_layout.addWidget(self.summen_frame)
+        # --- Summen-Banner (SummenBannerWidget – gleich wie Modul 2) ---
+        self.summen_banner = SummenBannerWidget(self)
+        right_layout.addWidget(self.summen_banner)
 
-        # Tabellen-Aenderungen tracken fuer Live-Summe + Validierung
+        # Legacy-Kompatibilitaet: summen_frame zeigt auf summen_banner
+        self.summen_frame = self.summen_banner
+
+        # Tabellen-Aenderungen tracken fuer Live-Summe (nur Verkauf-Legacy-Tabelle)
         self.table_waren.itemChanged.connect(self._on_waren_table_changed)
 
         # Initial die Tabelle und das Formular aufbauen
@@ -409,6 +407,11 @@ class OrderEntryApp(QWidget):
             self._einkauf_form_scroll.setVisible(True)
             self.form_layout_frame.setVisible(False)
 
+            # EinkaufItemsTableWidget sichtbar, Legacy-Tabelle versteckt
+            self.einkauf_items_widget.setVisible(True)
+            self.table_waren.setVisible(False)
+            self._ean_legacy_row_widget.setVisible(False)
+
             # inputs direkt aus EinkaufHeadFormWidget uebernehmen (InlineChangeFieldRow)
             self.inputs = self.einkauf_form_widget.inputs
 
@@ -416,24 +419,25 @@ class OrderEntryApp(QWidget):
             self.lbl_shop_logo = self.einkauf_form_widget.lbl_shop_logo
             self.btn_logo_search = self.einkauf_form_widget.btn_logo_search
 
-            self.table_waren.setHorizontalHeaderLabels(["Bild", "Produkt", "Variante", "EAN", "Menge", "Stückpreis", ""])
-
             # Bestellnummer-Feld: textChanged → Save-Button-State aktualisieren
             bestnr_widget = self.inputs.get("bestellnummer")
             if bestnr_widget:
-                # InlineChangeFieldRow hat normal_input (QLineEdit) mit textChanged
                 inner = getattr(bestnr_widget, "normal_input", bestnr_widget)
                 if hasattr(inner, "textChanged"):
-                    # Alte Verbindung trennen (verhindert Mehrfach-Connects bei Moduswechsel)
                     try:
                         inner.textChanged.disconnect()
                     except TypeError:
-                        pass  # Noch keine Verbindung vorhanden
+                        pass
                     inner.textChanged.connect(lambda _: self._update_save_button_state())
         else:
             # Legacy-QFormLayout fuer Verkauf-Modus
             self._einkauf_form_scroll.setVisible(False)
             self.form_layout_frame.setVisible(True)
+
+            # EinkaufItemsTableWidget versteckt, Legacy-Tabelle sichtbar
+            self.einkauf_items_widget.setVisible(False)
+            self.table_waren.setVisible(True)
+            self._ean_legacy_row_widget.setVisible(True)
 
             # Alte Widgets entfernen
             while self.form_layout.count():
@@ -609,48 +613,30 @@ class OrderEntryApp(QWidget):
                 line_edit.setText(value)
 
         waren = self.current_gemini_data.get("waren", [])
-        self.table_waren.setRowCount(len(waren))
-        
-        
-        for row, item in enumerate(waren):
-            produkt_name = str(item.get("produkt_name", "")).strip()
-            ean = str(item.get("ean", "")).strip()
-            
-            # Falls die EAN leer ist, fragen wir die Datenbank!
-            if not ean and produkt_name:
-                ean = self.ean_service.find_best_local_ean_by_name(produkt_name, str(item.get("varianten_info", "")))
 
-            if self.scan_mode == "einkauf":
-                # Spalte 0: Produktbild-Vorschau (Placeholder)
-                img_label = QLabel()
-                img_label.setFixedSize(42, 42)
-                img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                first_letter = (produkt_name[:1] or "P").upper()
-                img_label.setPixmap(create_placeholder_pixmap(first_letter, 38, background="#202233", foreground="#a9b1d6"))
-                img_label.setStyleSheet("QLabel { background-color: transparent; border: none; }")
-                self.table_waren.setCellWidget(row, 0, img_label)
-                self.table_waren.setRowHeight(row, 46)
-
-                self.table_waren.setItem(row, 1, QTableWidgetItem(produkt_name))
-                self.table_waren.setItem(row, 2, QTableWidgetItem(str(item.get("varianten_info", ""))))
-                self.table_waren.setItem(row, 3, QTableWidgetItem(ean))
-                self.table_waren.setItem(row, 4, QTableWidgetItem(str(item.get("menge", "1"))))
-                self.table_waren.setItem(row, 5, QTableWidgetItem(str(item.get("ekp_brutto", "0.00"))))
-                btn_img = QPushButton("Suchen")
-                btn_img.setCursor(Qt.CursorShape.PointingHandCursor)
-                btn_img.clicked.connect(lambda checked, r=row: self._start_product_image_search(r))
-                self.table_waren.setCellWidget(row, 6, btn_img)
-            else:
+        if self.scan_mode == "einkauf":
+            # EinkaufItemsTableWidget befuellen (gleich wie Modul 2)
+            self.einkauf_items_widget.set_items(
+                waren,
+                ean_fill_callback=self.ean_service.find_best_local_ean_by_name,
+                payload=self.current_gemini_data,
+            )
+            gesamt = self.current_gemini_data.get("gesamt_ekp_brutto")
+            self.summen_banner.update_from_items(waren or [], gesamt)
+        else:
+            # Legacy-Tabelle fuer Verkauf
+            self.table_waren.setRowCount(len(waren))
+            for row, item in enumerate(waren):
+                produkt_name = str(item.get("produkt_name", "")).strip()
+                ean = str(item.get("ean", "")).strip()
                 self.table_waren.setItem(row, 0, QTableWidgetItem(produkt_name))
                 self.table_waren.setItem(row, 1, QTableWidgetItem(ean))
                 self.table_waren.setItem(row, 2, QTableWidgetItem(str(item.get("menge", "1"))))
                 self.table_waren.setItem(row, 3, QTableWidgetItem(str(item.get("vk_brutto", "0.00"))))
                 self.table_waren.setItem(row, 4, QTableWidgetItem(str(item.get("marge_gesamt", "0.00"))))
+            self.table_waren.resizeColumnsToContents()
 
-        self.table_waren.resizeColumnsToContents()
-
-        # Summen-Banner und Save-Button-State aktualisieren
-        self._update_summen_banner()
+        # Save-Button-State aktualisieren
         self._update_save_button_state()
 
         # Nach AI-Fill: Lookup-Bindings fuer die befuellten Felder triggern
@@ -801,23 +787,8 @@ class OrderEntryApp(QWidget):
             for key, widget in self.inputs.items():
                 payload[key] = str(widget.text() or "").strip()
 
-            # Waren aus der Tabelle hinzufuegen (fuer vollstaendigen Payload)
-            waren = []
-            for r in range(self.table_waren.rowCount()):
-                if self.scan_mode == "einkauf":
-                    item_produkt = self.table_waren.item(r, 1)
-                    item_var = self.table_waren.item(r, 2)
-                    item_ean = self.table_waren.item(r, 3)
-                    item_menge = self.table_waren.item(r, 4)
-                    item_preis = self.table_waren.item(r, 5)
-                    waren.append({
-                        "produkt_name": item_produkt.text() if item_produkt else "",
-                        "varianten_info": item_var.text() if item_var else "",
-                        "ean": item_ean.text() if item_ean else "",
-                        "menge": item_menge.text() if item_menge else "1",
-                        "ekp_brutto": item_preis.text() if item_preis else "0.00",
-                    })
-            payload["waren"] = waren
+            # Waren aus EinkaufItemsTableWidget fuer den Review-Payload
+            payload["waren"] = self.einkauf_items_widget.get_items()
 
             # Review-Bundle aufbauen (nutzt preview_order_enrichment fuer Diff)
             bundle = EinkaufPipeline.build_order_review_bundle(
@@ -837,31 +808,14 @@ class OrderEntryApp(QWidget):
                 # current_gemini_data mit DB-Werten vorbelegen, damit Speichern ohne Scan funktioniert
                 self.current_gemini_data = dict(existing_order)
 
-            # Warenpositionen aus DB in die Tabelle laden
+            # Warenpositionen aus DB in EinkaufItemsTableWidget laden
             existing_waren = order_preview.get("existing_waren", [])
             if existing_waren:
-                self.table_waren.setRowCount(len(existing_waren))
-                for row, item in enumerate(existing_waren):
-                    produkt_name = str(item.get("produkt_name", "")).strip()
-                    # Spalte 0: Produktbild-Platzhalter
-                    img_label = QLabel()
-                    img_label.setFixedSize(42, 42)
-                    img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                    first_letter = (produkt_name[:1] or "P").upper()
-                    img_label.setPixmap(create_placeholder_pixmap(first_letter, 38, background="#202233", foreground="#a9b1d6"))
-                    img_label.setStyleSheet("QLabel { background-color: transparent; border: none; }")
-                    self.table_waren.setCellWidget(row, 0, img_label)
-                    self.table_waren.setRowHeight(row, 46)
-                    self.table_waren.setItem(row, 1, QTableWidgetItem(produkt_name))
-                    self.table_waren.setItem(row, 2, QTableWidgetItem(str(item.get("varianten_info", ""))))
-                    self.table_waren.setItem(row, 3, QTableWidgetItem(str(item.get("ean", ""))))
-                    self.table_waren.setItem(row, 4, QTableWidgetItem(str(item.get("menge", "1"))))
-                    self.table_waren.setItem(row, 5, QTableWidgetItem(str(item.get("ekp_brutto", "0.00"))))
-                    btn_img = QPushButton("Suchen")
-                    btn_img.setCursor(Qt.CursorShape.PointingHandCursor)
-                    btn_img.clicked.connect(lambda checked, r=row: self._start_product_image_search(r))
-                    self.table_waren.setCellWidget(row, 6, btn_img)
-                self.table_waren.resizeColumnsToContents()
+                self.einkauf_items_widget.set_items(
+                    existing_waren,
+                    ean_fill_callback=self.ean_service.find_best_local_ean_by_name,
+                    payload=existing_order or {},
+                )
                 # Waren auch in current_gemini_data eintragen
                 self.current_gemini_data["waren"] = [dict(w) for w in existing_waren]
 
@@ -884,22 +838,24 @@ class OrderEntryApp(QWidget):
             CustomMsgBox.information(self, "EAN Suche", "Es laeuft bereits eine EAN-Suche im Hintergrund.")
             return
 
-        row = self.table_waren.currentRow()
-        if row < 0:
-            CustomMsgBox.information(self, "EAN Suche", "Bitte zuerst eine Artikelzeile markieren.")
-            return
-
-        produkt_name = ""
-        varianten_info = ""
-        # Einkauf: Bild(0), Produkt(1), Variante(2), EAN(3) | Verkauf: Produkt(0), EAN(1)
-        name_col = 1 if self.scan_mode == "einkauf" else 0
-        var_col = 2 if self.scan_mode == "einkauf" else -1
-        ean_col = 3 if self.scan_mode == "einkauf" else 1
-
-        if self.table_waren.item(row, name_col):
-            produkt_name = self.table_waren.item(row, name_col).text().strip()
-        if var_col >= 0 and self.table_waren.item(row, var_col):
-            varianten_info = self.table_waren.item(row, var_col).text().strip()
+        if self.scan_mode == "einkauf":
+            # EinkaufItemsTableWidget liefert den Kontext der markierten Zeile
+            context = self.einkauf_items_widget.get_selected_context()
+            if not isinstance(context, dict):
+                CustomMsgBox.information(self, "EAN Suche", "Bitte zuerst eine Artikelzeile markieren.")
+                return
+            produkt_name = str(context.get("produkt_name", "")).strip()
+            varianten_info = str(context.get("varianten_info", "")).strip()
+            row = int(context.get("row", -1) or -1)
+            ean_col = int(context.get("ean_col", 4) or 4)
+        else:
+            row = self.table_waren.currentRow()
+            if row < 0:
+                CustomMsgBox.information(self, "EAN Suche", "Bitte zuerst eine Artikelzeile markieren.")
+                return
+            produkt_name = self.table_waren.item(row, 0).text().strip() if self.table_waren.item(row, 0) else ""
+            varianten_info = ""
+            ean_col = 1
 
         if not produkt_name:
             CustomMsgBox.warning(self, "EAN Suche", "In der markierten Zeile fehlt der Produktname.")
@@ -966,12 +922,19 @@ class OrderEntryApp(QWidget):
             return
 
         row = int(context.get("row", -1) or -1)
-        ean_col = int(context.get("ean_col", 2) or 2)
-        if row < 0 or row >= self.table_waren.rowCount():
-            CustomMsgBox.warning(self, "EAN Suche", "Die bearbeitete Tabellenzeile existiert nicht mehr.")
-            return
+        ean_col = int(context.get("ean_col", 4) or 4)
 
-        self.table_waren.setItem(row, ean_col, QTableWidgetItem(chosen_ean))
+        if self.scan_mode == "einkauf":
+            if row < 0 or row >= len(self.einkauf_items_widget._items):
+                CustomMsgBox.warning(self, "EAN Suche", "Die bearbeitete Tabellenzeile existiert nicht mehr.")
+                return
+            self.einkauf_items_widget.set_ean_for_row(row, chosen_ean)
+        else:
+            if row < 0 or row >= self.table_waren.rowCount():
+                CustomMsgBox.warning(self, "EAN Suche", "Die bearbeitete Tabellenzeile existiert nicht mehr.")
+                return
+            self.table_waren.setItem(row, ean_col, QTableWidgetItem(chosen_ean))
+
         self.ean_service.remember_candidate_selection(
             produkt_name,
             selected,
@@ -1084,26 +1047,26 @@ class OrderEntryApp(QWidget):
 
     # ── Produktbild-Suche (Google Custom Search API, 100 Gratis/Tag) ─
 
+    def _on_items_image_search_requested(self, payload):
+        """Slot fuer EinkaufItemsTableWidget.imageSearchRequested – leitet an _start_product_image_search weiter."""
+        if not isinstance(payload, dict):
+            return
+        produkt_name = str(payload.get("produkt_name", "")).strip()
+        row = int(payload.get("source_row_index", -1) or -1)
+        self._start_product_image_search_from_context(row, produkt_name,
+                                                       str(payload.get("varianten_info", "")).strip(),
+                                                       str(payload.get("ean", "")).strip())
+
     def _start_product_image_search(self, row):
+        """Legacy: Bildsuche aus der alten Tabelle starten (Verkauf-Modus)."""
+        produkt_name = self.table_waren.item(row, 0).text().strip() if self.table_waren.item(row, 0) else ""
+        ean = self.table_waren.item(row, 1).text().strip() if self.table_waren.item(row, 1) else ""
+        self._start_product_image_search_from_context(row, produkt_name, "", ean)
+
+    def _start_product_image_search_from_context(self, row, produkt_name, varianten_info, ean):
         if self.product_image_search_worker is not None and self.product_image_search_worker.isRunning():
             CustomMsgBox.information(self, "Bildsuche", "Es laeuft bereits eine Bildsuche im Hintergrund.")
             return
-
-        produkt_name = ""
-        varianten_info = ""
-        ean = ""
-
-        # Einkauf: Bild(0), Produkt(1), Variante(2), EAN(3) | Verkauf: Produkt(0), EAN(1)
-        name_col = 1 if self.scan_mode == "einkauf" else 0
-        var_col = 2 if self.scan_mode == "einkauf" else -1
-        ean_col = 3 if self.scan_mode == "einkauf" else 1
-
-        if self.table_waren.item(row, name_col):
-            produkt_name = self.table_waren.item(row, name_col).text().strip()
-        if var_col >= 0 and self.table_waren.item(row, var_col):
-            varianten_info = self.table_waren.item(row, var_col).text().strip()
-        if self.table_waren.item(row, ean_col):
-            ean = self.table_waren.item(row, ean_col).text().strip()
 
         if not produkt_name:
             CustomMsgBox.warning(self, "Bildsuche", "In der markierten Zeile fehlt der Produktname.")
@@ -1165,19 +1128,8 @@ class OrderEntryApp(QWidget):
                 source_kind="manual_web_selection",
                 source_ref=str(selected.get("source_page_url", "") or "").strip(),
             )
-            # Produktbild-Vorschau in der Tabelle aktualisieren
-            target_row = context.get("row", -1)
-            img_path = ""
-            if isinstance(result, dict):
-                asset = result.get("asset") or {}
-                img_path = str(asset.get("file_path", "") or "").strip()
-            if img_path and target_row >= 0:
-                img_path = self._resolve_media_path(img_path)
-                source_px = QPixmap(img_path)
-                if not source_px.isNull():
-                    img_label = self.table_waren.cellWidget(target_row, 0)
-                    if isinstance(img_label, QLabel):
-                        img_label.setPixmap(render_preview_pixmap(source_px, 38, background="#ffffff", radius=6, inset=2))
+            # EinkaufItemsTableWidget rendert Bilder selbst via OrderVisualState;
+            # nach Speichern des Assets genuegt ein Hinweis
             CustomMsgBox.information(self, "Bildsuche", f"Produktbild fuer '{produkt_name}' wurde gespeichert.")
         except Exception as exc:
             log_exception(__name__, exc)
@@ -1208,53 +1160,12 @@ class OrderEntryApp(QWidget):
         self._update_save_button_state()
 
     def _update_summen_banner(self):
-        """Aktualisiert das Summen-Banner mit berechnetem Warenwert vs. KI-Gesamtpreis."""
+        """Aktualisiert das Summen-Banner ueber SummenBannerWidget (gleich wie Modul 2)."""
         if self.scan_mode != "einkauf":
-            self.summen_frame.setVisible(False)
             return
-
-        rows = self.table_waren.rowCount()
-        if rows == 0:
-            self.summen_frame.setVisible(False)
-            return
-
-        # Berechneten Warenwert ermitteln
-        warenwert = 0.0
-        for r in range(rows):
-            menge_item = self.table_waren.item(r, 4)
-            preis_item = self.table_waren.item(r, 5)
-            try:
-                menge = float(str(menge_item.text()).replace(",", ".")) if menge_item else 0
-                preis = float(str(preis_item.text()).replace(",", ".")) if preis_item else 0
-                warenwert += menge * preis
-            except (ValueError, AttributeError):
-                pass
-
-        self.lbl_summe_berechnet.setText(f"Berechnet: {warenwert:.2f} EUR")
-
-        # KI-Gesamtpreis aus current_gemini_data
-        ki_gesamt = 0.0
-        try:
-            ki_gesamt = float(str(self.current_gemini_data.get("gesamt_ekp_brutto", 0)).replace(",", "."))
-        except (ValueError, TypeError):
-            pass
-
-        if ki_gesamt > 0:
-            self.lbl_summe_ki.setText(f"KI-Gesamtpreis: {ki_gesamt:.2f} EUR")
-            self.lbl_summe_ki.setVisible(True)
-
-            delta = abs(warenwert - ki_gesamt)
-            if delta > 0.02:
-                self.lbl_summe_warnung.setText(f"Abweichung: {delta:.2f} EUR")
-                self.lbl_summe_warnung.setStyleSheet("color: #f7c66f; font-size: 12px; font-weight: bold; border: none;")
-                self.lbl_summe_warnung.setVisible(True)
-            else:
-                self.lbl_summe_warnung.setVisible(False)
-        else:
-            self.lbl_summe_ki.setVisible(False)
-            self.lbl_summe_warnung.setVisible(False)
-
-        self.summen_frame.setVisible(True)
+        waren = self.einkauf_items_widget.get_items()
+        gesamt = self.current_gemini_data.get("gesamt_ekp_brutto")
+        self.summen_banner.update_from_items(waren, gesamt)
 
     def _update_save_button_state(self):
         """Aktiviert/deaktiviert den Save-Button basierend auf Pflichtfeld-Validierung."""
@@ -1275,15 +1186,7 @@ class OrderEntryApp(QWidget):
                     inner.setStyleSheet("")
                     inner.setToolTip("")
 
-            # Mindestens 1 Position mit Produktname
-            has_item = False
-            for r in range(self.table_waren.rowCount()):
-                name_item = self.table_waren.item(r, 1)
-                if name_item and str(name_item.text()).strip():
-                    has_item = True
-                    break
-
-            can_save = bool(bestellnummer) and has_item
+            can_save = bool(bestellnummer)
             self.btn_save_db.setEnabled(can_save)
         else:
             # Verkauf-Modus: Ticket-Name pruefen
@@ -1295,62 +1198,45 @@ class OrderEntryApp(QWidget):
 
     def _add_table_row(self):
         """Fuegt eine leere Zeile am Ende der Artikel-Tabelle hinzu."""
-        row = self.table_waren.rowCount()
-        self.table_waren.insertRow(row)
-
         if self.scan_mode == "einkauf":
-            # Spalte 0: Placeholder-Bild
-            img_label = QLabel()
-            img_label.setFixedSize(42, 42)
-            img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            img_label.setPixmap(create_placeholder_pixmap("?", 38, background="#202233", foreground="#a9b1d6"))
-            img_label.setStyleSheet("QLabel { background-color: transparent; border: none; }")
-            self.table_waren.setCellWidget(row, 0, img_label)
-            self.table_waren.setRowHeight(row, 46)
-
-            self.table_waren.setItem(row, 1, QTableWidgetItem(""))
-            self.table_waren.setItem(row, 2, QTableWidgetItem(""))
-            self.table_waren.setItem(row, 3, QTableWidgetItem(""))
-            self.table_waren.setItem(row, 4, QTableWidgetItem("1"))
-            self.table_waren.setItem(row, 5, QTableWidgetItem("0.00"))
-
-            btn_img = QPushButton("Suchen")
-            btn_img.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn_img.clicked.connect(lambda checked, r=row: self._start_product_image_search(r))
-            self.table_waren.setCellWidget(row, 6, btn_img)
+            # EinkaufItemsTableWidget: neue leere Zeile hinzufuegen
+            self.einkauf_items_widget.add_empty_row()
+            self._update_summen_banner()
+            self._update_save_button_state()
         else:
+            row = self.table_waren.rowCount()
+            self.table_waren.insertRow(row)
             self.table_waren.setItem(row, 0, QTableWidgetItem(""))
             self.table_waren.setItem(row, 1, QTableWidgetItem(""))
             self.table_waren.setItem(row, 2, QTableWidgetItem("1"))
             self.table_waren.setItem(row, 3, QTableWidgetItem("0.00"))
             self.table_waren.setItem(row, 4, QTableWidgetItem("0.00"))
-
-        # Neue Zeile direkt zum Editieren auswaehlen
-        self.table_waren.setCurrentCell(row, 1 if self.scan_mode == "einkauf" else 0)
-        self.table_waren.editItem(self.table_waren.item(row, 1 if self.scan_mode == "einkauf" else 0))
-        self._update_summen_banner()
-        self._update_save_button_state()
+            self.table_waren.setCurrentCell(row, 0)
+            self.table_waren.editItem(self.table_waren.item(row, 0))
+            self._update_save_button_state()
 
     def _delete_selected_rows(self):
-        """Loescht die markierten Zeilen aus der Artikel-Tabelle (mit Bestaetigung)."""
-        selected_rows = sorted(set(idx.row() for idx in self.table_waren.selectedIndexes()), reverse=True)
-        if not selected_rows:
-            CustomMsgBox.information(self, "Loeschen", "Bitte zuerst eine Zeile in der Tabelle markieren.")
-            return
-
-        count = len(selected_rows)
-        if count > 1:
-            reply = CustomMsgBox.question(
-                self, "Zeilen loeschen",
-                f"{count} Zeilen wirklich loeschen?",
-            )
-            if reply != QMessageBox.StandardButton.Yes:
+        """Loescht die markierte Zeile aus der Artikel-Tabelle."""
+        if self.scan_mode == "einkauf":
+            self.einkauf_items_widget.delete_selected_rows()
+            self._update_summen_banner()
+            self._update_save_button_state()
+        else:
+            selected_rows = sorted(set(idx.row() for idx in self.table_waren.selectedIndexes()), reverse=True)
+            if not selected_rows:
+                CustomMsgBox.information(self, "Loeschen", "Bitte zuerst eine Zeile in der Tabelle markieren.")
                 return
-
-        for row in selected_rows:
-            self.table_waren.removeRow(row)
-        self._update_summen_banner()
-        self._update_save_button_state()
+            count = len(selected_rows)
+            if count > 1:
+                reply = CustomMsgBox.question(
+                    self, "Zeilen loeschen",
+                    f"{count} Zeilen wirklich loeschen?",
+                )
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
+            for row in selected_rows:
+                self.table_waren.removeRow(row)
+            self._update_save_button_state()
 
     def _reset_form(self):
         self.drop_box.current_pixmap = None
@@ -1373,9 +1259,12 @@ class OrderEntryApp(QWidget):
             for le in self.inputs.values():
                 le.clear()
 
-        self.table_waren.setRowCount(0)
+        if self.scan_mode == "einkauf":
+            self.einkauf_items_widget.clear_items()
+            self.summen_banner.update_from_items([], None)
+        else:
+            self.table_waren.setRowCount(0)
         self.current_gemini_data = {}
-        self.summen_frame.setVisible(False)
 
         self.btn_scan.setEnabled(False)
         self.btn_save_db.setEnabled(False)
@@ -1395,33 +1284,14 @@ class OrderEntryApp(QWidget):
             for db_key, line_edit in self.inputs.items():
                 self.current_gemini_data[db_key] = line_edit.text()
 
-        # Validierung: Mindestens 1 Position mit Produktname erforderlich
-        rows = self.table_waren.rowCount()
-        if rows == 0:
-            CustomMsgBox.warning(self, "Validierung", "Keine Artikel vorhanden. Bitte mindestens eine Position hinzufuegen.")
-            return
-
-        name_col = 1 if self.scan_mode == "einkauf" else 0
-        has_valid_item = any(
-            self.table_waren.item(r, name_col) and str(self.table_waren.item(r, name_col).text()).strip()
-            for r in range(rows)
-        )
-        if not has_valid_item:
-            CustomMsgBox.warning(self, "Validierung", "Mindestens eine Position muss einen Produktnamen haben.")
-            return
-
-        # Tabelle auslesen
-        waren_liste = []
-        for r in range(rows):
-            if self.scan_mode == "einkauf":
-                w = {
-                    "produkt_name": self.table_waren.item(r, 1).text() if self.table_waren.item(r, 1) else "",
-                    "varianten_info": self.table_waren.item(r, 2).text() if self.table_waren.item(r, 2) else "",
-                    "ean": self.table_waren.item(r, 3).text() if self.table_waren.item(r, 3) else "",
-                    "menge": self.table_waren.item(r, 4).text() if self.table_waren.item(r, 4) else "1",
-                    "ekp_brutto": self.table_waren.item(r, 5).text() if self.table_waren.item(r, 5) else "0.00"
-                }
-            else:
+        # Artikel auslesen
+        if self.scan_mode == "einkauf":
+            # EinkaufItemsTableWidget liefert die aktuelle Artikelliste
+            waren_liste = self.einkauf_items_widget.get_items()
+        else:
+            rows = self.table_waren.rowCount()
+            waren_liste = []
+            for r in range(rows):
                 w = {
                     "produkt_name": self.table_waren.item(r, 0).text() if self.table_waren.item(r, 0) else "",
                     "ean": self.table_waren.item(r, 1).text() if self.table_waren.item(r, 1) else "",
@@ -1429,8 +1299,8 @@ class OrderEntryApp(QWidget):
                     "vk_brutto": self.table_waren.item(r, 3).text() if self.table_waren.item(r, 3) else "0.00",
                     "marge_gesamt": self.table_waren.item(r, 4).text() if self.table_waren.item(r, 4) else "0.00"
                 }
-            waren_liste.append(w)
-        
+                waren_liste.append(w)
+
         self.current_gemini_data["waren"] = waren_liste
 
         if self.scan_mode == "einkauf":
