@@ -46,7 +46,7 @@ import ssl
 from module.background_tasks import BackgroundTask
 from module.gemini_api import process_receipt_with_gemini
 from module.einkauf_pipeline import EinkaufPipeline
-from module.einkauf_ui import EinkaufHeadFormWidget, EinkaufItemsTableWidget, OrderReviewPanelWidget
+from module.einkauf_ui import EinkaufHeadFormWidget, EinkaufItemsTableWidget, OrderReviewPanelWidget, SummenBannerWidget
 from module.normalization_dialog import NormalizationPanel
 from module.amazon_country_dialog import AmazonCountryPanel
 from module.ean_service import EanService
@@ -869,7 +869,8 @@ class MailScraperApp(QWidget):
       except Exception:
         mail_limit = 5
 
-    self.scraper_thread = MailScraperThread(host, port, user, pwd, mail_limit, last_uid, self.settings_manager, account_idx)
+    account_name = self.account_combo.currentText()
+    self.scraper_thread = MailScraperThread(host, port, user, pwd, mail_limit, last_uid, self.settings_manager, account_idx, account_name)
     self.scraper_thread.log_signal.connect(self._log)
     self.scraper_thread.progress_signal.connect(self._update_progress)
     self.scraper_thread.mail_detected_signal.connect(self._on_mail_detected)
@@ -1604,6 +1605,8 @@ class GeminiEmailThread(QThread):
             screenshot_source = next((source for source in prepared_scan.sources if source.source_type == "mail_render_screenshot" and isinstance(source.metadata, dict) and source.metadata.get("media_asset_id")), None)
             merged_result["_screenshot_media_asset_id"] = screenshot_source.metadata.get("media_asset_id") if screenshot_source else None
             merged_result["_pipeline_card_key"] = str(raw.get("_pipeline_card_key", "") or "")
+            merged_result["_mail_uid"] = str(raw.get("_mail_uid", "") or "")
+            merged_result["_mail_account"] = str(raw.get("_mail_account", "") or "")
 
             has_relevant_data = bool(
               merged_result.get("shop_name")
@@ -1700,7 +1703,7 @@ class MailScraperThread(QThread):
   raw_signal = pyqtSignal(list, int, int)
   mail_detected_signal = pyqtSignal(dict, int, int)
 
-  def __init__(self, host, port, user, pwd, mail_limit=5, last_uid=0, settings_manager=None, account_idx=-1):
+  def __init__(self, host, port, user, pwd, mail_limit=5, last_uid=0, settings_manager=None, account_idx=-1, account_name=""):
     super().__init__()
     self.host = host
     self.port = port
@@ -1710,6 +1713,7 @@ class MailScraperThread(QThread):
     self.last_uid = int(last_uid or 0)
     self.settings_manager = settings_manager
     self.account_idx = account_idx
+    self.account_name = str(account_name or user or "")
 
   def run(self):
     raw_emails = []
@@ -1874,6 +1878,8 @@ class MailScraperThread(QThread):
             "cid_map": cid_map,
             "attachments": attachments,
             "_pipeline_card_key": f"mail-{uid_int}",
+            "_mail_uid": str(uid_int),
+            "_mail_account": str(self.account_name),
           }
           raw_emails.append(mail_payload)
           self.mail_detected_signal.emit(dict(mail_payload), idx + 1, total)
@@ -1966,14 +1972,121 @@ class ScraperReviewWizardDialog(QDialog):
 
   def _build_ui(self):
     layout = QVBoxLayout(self)
+    layout.setContentsMargins(12, 8, 12, 8)
+    layout.setSpacing(6)
 
+    # ── Mail-Info-Banner: Absender, Betreff, Datum ─────────────────────
+    self.mail_info_banner = QFrame()
+    self.mail_info_banner.setStyleSheet(
+        "QFrame { background-color: #1f2335; border: 1px solid #414868; border-radius: 8px; }"
+    )
+    banner_layout = QHBoxLayout(self.mail_info_banner)
+    banner_layout.setContentsMargins(14, 8, 14, 8)
+    banner_layout.setSpacing(12)
+
+    # Fortschritt + Duplikat-Badge (links)
+    progress_col = QVBoxLayout()
+    progress_col.setSpacing(2)
     self.lbl_progress = QLabel("")
-    self.lbl_progress.setStyleSheet("font-size: 16px; font-weight: bold; color: #7aa2f7;")
-    layout.addWidget(self.lbl_progress)
+    self.lbl_progress.setStyleSheet("font-size: 15px; font-weight: bold; color: #7aa2f7; border: none;")
+    progress_col.addWidget(self.lbl_progress)
 
-    self.lbl_hint = QLabel("Jede Mail wird einzeln geprueft. Speichern oeffnet die bekannten Matching-Dialoge.")
-    self.lbl_hint.setStyleSheet("font-size: 13px; color: #a9b1d6;")
-    layout.addWidget(self.lbl_hint)
+    self.lbl_duplicate_badge = QLabel("")
+    self.lbl_duplicate_badge.setStyleSheet(
+        "font-size: 11px; font-weight: bold; color: #ff9e64; background-color: #3c2418;"
+        " border: 1px solid #ff9e64; border-radius: 4px; padding: 2px 6px;"
+    )
+    self.lbl_duplicate_badge.setVisible(False)
+    progress_col.addWidget(self.lbl_duplicate_badge)
+    banner_layout.addLayout(progress_col)
+
+    # Trennlinie
+    sep1 = QFrame()
+    sep1.setFrameShape(QFrame.Shape.VLine)
+    sep1.setStyleSheet("color: #414868; border: none; background-color: #414868; max-width: 1px;")
+    banner_layout.addWidget(sep1)
+
+    # Mail-Metadaten (Mitte)
+    mail_meta_col = QVBoxLayout()
+    mail_meta_col.setSpacing(1)
+    self.lbl_mail_sender = QLabel("")
+    self.lbl_mail_sender.setStyleSheet("font-size: 13px; font-weight: bold; color: #c0caf5; border: none;")
+    self.lbl_mail_sender.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+    mail_meta_col.addWidget(self.lbl_mail_sender)
+    self.lbl_mail_subject = QLabel("")
+    self.lbl_mail_subject.setStyleSheet("font-size: 12px; color: #a9b1d6; border: none;")
+    self.lbl_mail_subject.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+    mail_meta_col.addWidget(self.lbl_mail_subject)
+    banner_layout.addLayout(mail_meta_col, 1)
+
+    # Datum (rechts)
+    self.lbl_mail_date = QLabel("")
+    self.lbl_mail_date.setStyleSheet("font-size: 12px; color: #7aa2f7; border: none;")
+    self.lbl_mail_date.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+    banner_layout.addWidget(self.lbl_mail_date)
+
+    # Mapping-Status-Badge (rechts aussen)
+    self.lbl_mapping_badge = QLabel("")
+    self.lbl_mapping_badge.setStyleSheet(
+        "font-size: 11px; font-weight: bold; color: #9ece6a; background-color: #203225;"
+        " border: 1px solid #9ece6a; border-radius: 4px; padding: 2px 8px;"
+    )
+    self.lbl_mapping_badge.setVisible(False)
+    banner_layout.addWidget(self.lbl_mapping_badge)
+
+    layout.addWidget(self.mail_info_banner)
+
+    # ── Mail-Navigationsleiste: klickbare Status-Dots ──────────────────
+    self.nav_bar = QFrame()
+    self.nav_bar.setStyleSheet(
+        "QFrame { background-color: #1a1b26; border: none; }"
+    )
+    nav_layout = QHBoxLayout(self.nav_bar)
+    nav_layout.setContentsMargins(4, 2, 4, 2)
+    nav_layout.setSpacing(4)
+
+    self.btn_nav_prev = QPushButton("<")
+    self.btn_nav_prev.setFixedSize(28, 24)
+    self.btn_nav_prev.setStyleSheet(
+        "QPushButton { background-color: #24283b; color: #7aa2f7; border: 1px solid #414868;"
+        " border-radius: 4px; font-weight: bold; font-size: 13px; }"
+        "QPushButton:hover { background-color: #2f3452; }"
+        "QPushButton:disabled { color: #414868; }"
+    )
+    self.btn_nav_prev.setCursor(Qt.CursorShape.PointingHandCursor)
+    self.btn_nav_prev.clicked.connect(self._nav_go_prev)
+    nav_layout.addWidget(self.btn_nav_prev)
+
+    self._nav_dot_buttons = []
+    self._nav_dots_container = QHBoxLayout()
+    self._nav_dots_container.setSpacing(3)
+    for idx in range(len(self.data_list)):
+      dot = QPushButton("")
+      dot.setFixedSize(24, 24)
+      dot.setCursor(Qt.CursorShape.PointingHandCursor)
+      dot.setToolTip(f"Mail {idx + 1}")
+      dot.clicked.connect(lambda checked, i=idx: self._nav_go_to(i))
+      self._nav_dot_buttons.append(dot)
+      self._nav_dots_container.addWidget(dot)
+    nav_layout.addLayout(self._nav_dots_container)
+
+    self.btn_nav_next = QPushButton(">")
+    self.btn_nav_next.setFixedSize(28, 24)
+    self.btn_nav_next.setStyleSheet(
+        "QPushButton { background-color: #24283b; color: #7aa2f7; border: 1px solid #414868;"
+        " border-radius: 4px; font-weight: bold; font-size: 13px; }"
+        "QPushButton:hover { background-color: #2f3452; }"
+        "QPushButton:disabled { color: #414868; }"
+    )
+    self.btn_nav_next.setCursor(Qt.CursorShape.PointingHandCursor)
+    self.btn_nav_next.clicked.connect(self._nav_go_next)
+    nav_layout.addWidget(self.btn_nav_next)
+    nav_layout.addStretch()
+
+    # Status-Tracking pro Mail
+    self._mail_status = ["pending"] * len(self.data_list)
+
+    layout.addWidget(self.nav_bar)
 
     self.content_splitter = QSplitter(Qt.Orientation.Horizontal, self)
     self.content_splitter.setChildrenCollapsible(False)
@@ -2106,13 +2219,10 @@ class ScraperReviewWizardDialog(QDialog):
     self.table_waren = self.einkauf_items_widget.table
     data_box.addWidget(self.einkauf_items_widget, 1)
 
-    ean_row = QHBoxLayout()
-    self.btn_ean_lookup = QPushButton("EAN suchen (markierte Zeile)")
-    self.btn_ean_lookup.setCursor(Qt.CursorShape.PointingHandCursor)
-    self.btn_ean_lookup.clicked.connect(self._lookup_ean_for_selected_row)
-    ean_row.addWidget(self.btn_ean_lookup)
-    ean_row.addStretch()
-    data_box.addLayout(ean_row)
+    self.summen_banner = SummenBannerWidget(self)
+    data_box.addWidget(self.summen_banner)
+
+    self.einkauf_items_widget.eanLookupRequested.connect(lambda _ctx: self._lookup_ean_for_selected_row())
 
     lbl_review = QLabel("Kurzuebersicht")
     lbl_review.setStyleSheet("font-size: 14px; font-weight: bold;")
@@ -2173,6 +2283,7 @@ class ScraperReviewWizardDialog(QDialog):
     self.mapping_frame.setVisible(False)
     mapping_box.addWidget(self.mapping_frame)
     mapping_box.addStretch(1)
+    self.mapping_panel_widget = mapping_panel
     self.content_splitter.addWidget(mapping_panel)
 
     self.content_splitter.setStretchFactor(0, 5)
@@ -2180,26 +2291,72 @@ class ScraperReviewWizardDialog(QDialog):
     self.content_splitter.setStretchFactor(2, 3)
     self.content_splitter.setSizes([620, 560, 340])
 
-    button_row = QHBoxLayout()
+    # ── Footer: Buttons + Live-Stats ─────────────────────────────────────
+    footer_frame = QFrame()
+    footer_frame.setStyleSheet(
+        "QFrame { background-color: #1f2335; border: 1px solid #414868; border-radius: 8px; }"
+    )
+    footer_layout = QHBoxLayout(footer_frame)
+    footer_layout.setContentsMargins(12, 6, 12, 6)
+    footer_layout.setSpacing(8)
+
     self.btn_cancel = QPushButton("Wizard beenden")
+    self.btn_cancel.setStyleSheet(
+        "QPushButton { background-color: #24283b; color: #a9b1d6; border: 1px solid #414868;"
+        " border-radius: 6px; padding: 8px 16px; font-size: 13px; }"
+        "QPushButton:hover { background-color: #2f3452; border-color: #7aa2f7; }"
+    )
+    self.btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
     self.btn_cancel.clicked.connect(self._on_cancel)
+    footer_layout.addWidget(self.btn_cancel)
 
-    self.btn_discard = QPushButton("Mail verwerfen")
+    # Live-Statistiken
+    self.lbl_stats = QLabel("")
+    self.lbl_stats.setTextFormat(Qt.TextFormat.RichText)
+    self.lbl_stats.setStyleSheet("font-size: 12px; color: #a9b1d6; border: none;")
+    footer_layout.addWidget(self.lbl_stats, 1)
+
+    self.btn_discard = QPushButton("Verwerfen")
+    self.btn_discard.setStyleSheet(
+        "QPushButton { background-color: #2d1f2b; color: #f7768e; border: 1px solid #f7768e;"
+        " border-radius: 6px; padding: 8px 16px; font-size: 13px; font-weight: bold; }"
+        "QPushButton:hover { background-color: #3c2433; }"
+    )
+    self.btn_discard.setCursor(Qt.CursorShape.PointingHandCursor)
+    self.btn_discard.setToolTip("Mail verwerfen (Ctrl+D)")
     self.btn_discard.clicked.connect(self._discard_current)
+    footer_layout.addWidget(self.btn_discard)
 
-    self.btn_skip = QPushButton("Mail ueberspringen")
+    self.btn_skip = QPushButton("Ueberspringen")
+    self.btn_skip.setStyleSheet(
+        "QPushButton { background-color: #3a3117; color: #f7c66f; border: 1px solid #f7c66f;"
+        " border-radius: 6px; padding: 8px 16px; font-size: 13px; font-weight: bold; }"
+        "QPushButton:hover { background-color: #4a411f; }"
+    )
+    self.btn_skip.setCursor(Qt.CursorShape.PointingHandCursor)
+    self.btn_skip.setToolTip("Mail ueberspringen (Ctrl+K)")
     self.btn_skip.clicked.connect(self._skip_current)
+    footer_layout.addWidget(self.btn_skip)
 
     self.btn_save_next = QPushButton("Speichern und weiter")
-    self.btn_save_next.setProperty("class", "retro-btn-action")
+    self.btn_save_next.setStyleSheet(
+        "QPushButton { background-color: #203225; color: #9ece6a; border: 1px solid #9ece6a;"
+        " border-radius: 6px; padding: 8px 20px; font-size: 14px; font-weight: bold; }"
+        "QPushButton:hover { background-color: #2a4232; }"
+    )
+    self.btn_save_next.setCursor(Qt.CursorShape.PointingHandCursor)
+    self.btn_save_next.setToolTip("Speichern und weiter (Ctrl+S)")
     self.btn_save_next.clicked.connect(self._save_current_and_next)
+    footer_layout.addWidget(self.btn_save_next)
 
-    button_row.addWidget(self.btn_cancel)
-    button_row.addStretch()
-    button_row.addWidget(self.btn_discard)
-    button_row.addWidget(self.btn_skip)
-    button_row.addWidget(self.btn_save_next)
-    layout.addLayout(button_row)
+    layout.addWidget(footer_frame)
+
+    # ── Keyboard-Shortcuts ─────────────────────────────────────────────
+    from PyQt6.QtGui import QShortcut, QKeySequence
+    QShortcut(QKeySequence("Ctrl+S"), self).activated.connect(self._save_current_and_next)
+    QShortcut(QKeySequence("Ctrl+K"), self).activated.connect(self._skip_current)
+    QShortcut(QKeySequence("Ctrl+D"), self).activated.connect(self._discard_current)
+
   def _set_progress_text(self):
     total = len(self.data_list)
     current_human = self.current_index + 1
@@ -2208,6 +2365,103 @@ class ScraperReviewWizardDialog(QDialog):
       self.btn_save_next.setText("Speichern und abschliessen")
     else:
       self.btn_save_next.setText("Speichern und weiter")
+    # Mail-Info-Banner aktualisieren
+    self._update_mail_info_banner()
+
+  def _update_mail_info_banner(self):
+    """Aktualisiert Absender, Betreff, Datum im oberen Banner."""
+    item = self._current_mail_item()
+    sender = str(item.get("_email_sender", "") or "").strip()
+    subject = str(item.get("subject", "") or item.get("_email_subject", "") or "").strip()
+    date = str(item.get("_email_date", "") or "").strip()
+    self.lbl_mail_sender.setText(sender or "Absender unbekannt")
+    self.lbl_mail_subject.setText(subject or "Kein Betreff")
+    self.lbl_mail_date.setText(date or "")
+
+  # ── Navigationsleiste ──────────────────────────────────────────────────
+
+  _NAV_DOT_STYLES = {
+      "pending":   "background-color: #414868; border: 2px solid #414868; border-radius: 12px;",
+      "current":   "background-color: #7aa2f7; border: 2px solid #7aa2f7; border-radius: 12px;",
+      "saved":     "background-color: #9ece6a; border: 2px solid #9ece6a; border-radius: 12px;",
+      "skipped":   "background-color: #f7c66f; border: 2px solid #f7c66f; border-radius: 12px;",
+      "discarded": "background-color: #f7768e; border: 2px solid #f7768e; border-radius: 12px;",
+  }
+
+  def _update_nav_dots(self):
+    """Aktualisiert Farben und Enabled-State aller Navigation-Dots."""
+    for idx, dot in enumerate(self._nav_dot_buttons):
+      if idx == self.current_index:
+        style = self._NAV_DOT_STYLES["current"]
+      else:
+        style = self._NAV_DOT_STYLES.get(self._mail_status[idx], self._NAV_DOT_STYLES["pending"])
+      dot.setStyleSheet(f"QPushButton {{ {style} }} QPushButton:hover {{ border-color: #7aa2f7; }}")
+      # Bereits verarbeitete Mails sind nicht erneut ansteuerbar
+      dot.setEnabled(self._mail_status[idx] == "pending" or idx == self.current_index)
+    has_prev_pending = any(self._mail_status[i] == "pending" for i in range(self.current_index - 1, -1, -1))
+    has_next_pending = any(self._mail_status[i] == "pending" for i in range(self.current_index + 1, len(self.data_list)))
+    self.btn_nav_prev.setEnabled(has_prev_pending)
+    self.btn_nav_next.setEnabled(has_next_pending)
+
+  def _nav_go_to(self, idx):
+    """Springt zu einer bestimmten Mail (nur wenn Status=pending)."""
+    if idx == self.current_index:
+      return
+    if 0 <= idx < len(self.data_list) and self._mail_status[idx] == "pending":
+      self.current_index = idx
+      self._load_current_mail()
+
+  def _nav_go_prev(self):
+    """Zur vorherigen pending Mail."""
+    for idx in range(self.current_index - 1, -1, -1):
+      if self._mail_status[idx] == "pending":
+        self._nav_go_to(idx)
+        return
+
+  def _nav_go_next(self):
+    """Zur naechsten pending Mail."""
+    for idx in range(self.current_index + 1, len(self.data_list)):
+      if self._mail_status[idx] == "pending":
+        self._nav_go_to(idx)
+        return
+
+  def _update_footer_stats(self):
+    """Aktualisiert die Live-Statistiken im Footer."""
+    total = len(self.data_list)
+    saved = self.summary.get("saved", 0)
+    skipped = self.summary.get("skipped", 0)
+    discarded = self.summary.get("discarded", 0)
+    pending = total - saved - skipped - discarded
+    parts = []
+    if saved:
+      parts.append(f"<span style='color: #9ece6a;'>{saved} gespeichert</span>")
+    if skipped:
+      parts.append(f"<span style='color: #f7c66f;'>{skipped} uebersprungen</span>")
+    if discarded:
+      parts.append(f"<span style='color: #f7768e;'>{discarded} verworfen</span>")
+    parts.append(f"<span style='color: #a9b1d6;'>{pending} offen</span>")
+    self.lbl_stats.setText(" | ".join(parts))
+
+  def _set_mapping_panel_collapsed(self, collapsed):
+    """Klappt das rechte Mapping-Panel ein/aus und verteilt den Platz um."""
+    sizes = self.content_splitter.sizes()
+    if len(sizes) < 3:
+      return
+    total = sum(sizes)
+    if collapsed:
+      # Mapping-Panel einklappen: nur Status-Zeile + Button sichtbar
+      mapping_min = 180
+      remaining = total - mapping_min
+      self.content_splitter.setSizes([remaining // 2, remaining - remaining // 2, mapping_min])
+      self.mapping_panel_widget.setMaximumWidth(200)
+      self.lbl_mapping_side_hint.setVisible(False)
+      self.mapping_frame.setVisible(False)
+    else:
+      # Mapping-Panel aufklappen
+      self.mapping_panel_widget.setMaximumWidth(420)
+      self.mapping_panel_widget.setMinimumWidth(300)
+      self.lbl_mapping_side_hint.setVisible(True)
+      self.content_splitter.setSizes([int(total * 0.38), int(total * 0.38), int(total * 0.24)])
 
   def _safe_text(self, value):
     if value is None:
@@ -2330,14 +2584,30 @@ class ScraperReviewWizardDialog(QDialog):
       self.lbl_mapping_state.setText("Mapping: erledigt")
       self.lbl_mapping_state.setStyleSheet("font-size: 12px; color: #9ece6a;")
       self.btn_run_mapping.setText("Mapping erneut pruefen")
+      self.lbl_mapping_badge.setText("Mapping OK")
+      self.lbl_mapping_badge.setStyleSheet(
+          "font-size: 11px; font-weight: bold; color: #9ece6a; background-color: #203225;"
+          " border: 1px solid #9ece6a; border-radius: 4px; padding: 2px 8px;"
+      )
+      self.lbl_mapping_badge.setVisible(True)
+      self._set_mapping_panel_collapsed(True)
     elif remaining > 0:
       self.lbl_mapping_state.setText(f"Mapping: {remaining} Schritt(e) offen")
       self.lbl_mapping_state.setStyleSheet("font-size: 12px; color: #f7c66f;")
       self.btn_run_mapping.setText("Mapping-Bereich anzeigen")
+      self.lbl_mapping_badge.setText(f"{remaining} Mapping offen")
+      self.lbl_mapping_badge.setStyleSheet(
+          "font-size: 11px; font-weight: bold; color: #f7c66f; background-color: #3a3117;"
+          " border: 1px solid #f7c66f; border-radius: 4px; padding: 2px 8px;"
+      )
+      self.lbl_mapping_badge.setVisible(True)
+      self._set_mapping_panel_collapsed(False)
     else:
       self.lbl_mapping_state.setText("Mapping: offen")
       self.lbl_mapping_state.setStyleSheet("font-size: 12px; color: #f7c66f;")
       self.btn_run_mapping.setText("Mapping jetzt starten")
+      self.lbl_mapping_badge.setVisible(False)
+      self._set_mapping_panel_collapsed(True)
 
   def _current_mail_item(self):
     return self.data_list[self.current_index]
@@ -2528,6 +2798,8 @@ class ScraperReviewWizardDialog(QDialog):
       ean_fill_callback=self.ean_service.find_best_local_ean_by_name,
       payload=payload,
     )
+    gesamt = (payload or {}).get("gesamt_ekp_brutto") if isinstance(payload, dict) else None
+    self.summen_banner.update_from_items(waren or [], gesamt)
 
   def _load_current_mail(self):
     item = self.data_list[self.current_index]
@@ -2555,8 +2827,37 @@ class ScraperReviewWizardDialog(QDialog):
     idx = self.current_index
     QTimer.singleShot(0, lambda idx=idx: self._auto_prompt_mapping_for_index(idx))
 
+    # --- Duplikat-Pre-Check ---
+    self._check_duplicate_for_current()
+
+    # --- Navigationsleiste + Stats aktualisieren ---
+    self._update_nav_dots()
+    self._update_footer_stats()
+
     # --- LookupService: Logo aus DB laden bevor API aufgerufen wird ---
     self._auto_lookup_shop_logo_from_db()
+
+  def _check_duplicate_for_current(self):
+    """Prueft ob die Bestellnummer der aktuellen Mail bereits in der DB existiert."""
+    try:
+      item = self._current_mail_item()
+      bestellnummer = str(item.get("bestellnummer", "") or "").strip()
+      if not bestellnummer:
+        self.lbl_duplicate_badge.setVisible(False)
+        return
+      db = self._shared_db
+      if db is None:
+        from module.database_manager import DatabaseManager
+        db = DatabaseManager(self.settings_manager)
+        self._shared_db = db
+      exists = db.bestellnummer_exists(bestellnummer)
+      if exists:
+        self.lbl_duplicate_badge.setText(f"Bestellung \"{bestellnummer}\" existiert bereits in der DB")
+        self.lbl_duplicate_badge.setVisible(True)
+      else:
+        self.lbl_duplicate_badge.setVisible(False)
+    except Exception:
+      self.lbl_duplicate_badge.setVisible(False)
 
   def _auto_lookup_shop_logo_from_db(self):
     """Prueft beim Laden einer Mail ob ein Shop-Logo in der lokalen DB existiert.
@@ -2826,6 +3127,7 @@ class ScraperReviewWizardDialog(QDialog):
     QMessageBox.warning(self, "EAN Suche", f"Die EAN-Suche ist fehlgeschlagen:\n{msg}")
 
   def _on_run_mapping_clicked(self):
+    self._set_mapping_panel_collapsed(False)
     self._run_mapping_for_current_mail(show_feedback=True, rebuild=True)
 
   def _run_mapping_for_current_mail(self, show_feedback=True, rebuild=False):
@@ -2868,6 +3170,10 @@ class ScraperReviewWizardDialog(QDialog):
         return
 
       payload = self._collect_current_payload()
+      item = self.data_list[self.current_index]
+      payload["quelle"] = "mail_scraper"
+      payload["mail_uid"] = str(item.get("_mail_uid", "") or "").strip()
+      payload["mail_account"] = str(item.get("_mail_account", "") or "").strip()
       self.data_list[self.current_index] = payload
 
       def _on_order_number_changed(new_no):
@@ -2904,6 +3210,7 @@ class ScraperReviewWizardDialog(QDialog):
         )
 
       self.summary["saved"] += 1
+      self._mail_status[self.current_index] = "saved"
       if save_result.get("renamed"):
         self.summary["renamed"] += 1
 
@@ -2921,6 +3228,7 @@ class ScraperReviewWizardDialog(QDialog):
 
   def _skip_current(self):
     self.summary["skipped"] += 1
+    self._mail_status[self.current_index] = "skipped"
     self._advance_to_next()
 
   def _discard_current(self):
@@ -2935,6 +3243,7 @@ class ScraperReviewWizardDialog(QDialog):
       return
 
     self.summary["discarded"] += 1
+    self._mail_status[self.current_index] = "discarded"
     self._advance_to_next()
 
   def _open_large_preview(self):
@@ -3050,10 +3359,23 @@ class ScraperReviewWizardDialog(QDialog):
     current_item = self.data_list[self.current_index] if 0 <= self.current_index < len(self.data_list) else None
     self._close_preview_dialogs()
     self._cleanup_mail_assets(current_item)
-    self.current_index += 1
-    if self.current_index >= len(self.data_list):
+    # Naechste pending Mail suchen
+    next_idx = -1
+    for idx in range(self.current_index + 1, len(self.data_list)):
+      if self._mail_status[idx] == "pending":
+        next_idx = idx
+        break
+    # Falls keine nach current gefunden, auch davor suchen
+    if next_idx < 0:
+      for idx in range(0, self.current_index):
+        if self._mail_status[idx] == "pending":
+          next_idx = idx
+          break
+    if next_idx < 0:
+      # Alle verarbeitet
       self.accept()
       return
+    self.current_index = next_idx
     self._load_current_mail()
 
   def _on_cancel(self):

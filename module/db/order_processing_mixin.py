@@ -410,10 +410,11 @@ class OrderProcessingMixin:
                 tracking_nummer_einkauf, paketdienst, lieferdatum, sendungsstatus,
                 gesamt_ekp_brutto, warenwert_brutto, versandkosten_brutto,
                 nebenkosten_brutto, rabatt_brutto, einstand_gesamt_brutto, ust_satz,
-                reverse_charge, storno_status, einstand_gesamt_netto
+                reverse_charge, storno_status, einstand_gesamt_netto,
+                zahlungsart, quelle, mail_uid, mail_account
             ) VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s
             )
             ON DUPLICATE KEY UPDATE
                 kaufdatum = IF(VALUES(kaufdatum) IS NOT NULL, VALUES(kaufdatum), kaufdatum),
@@ -431,7 +432,10 @@ class OrderProcessingMixin:
                 einstand_gesamt_brutto = IF(VALUES(einstand_gesamt_brutto) > 0, VALUES(einstand_gesamt_brutto), einstand_gesamt_brutto),
                 ust_satz = IF(VALUES(ust_satz) > 0, VALUES(ust_satz), ust_satz),
                 reverse_charge = VALUES(reverse_charge),
-                einstand_gesamt_netto = IF(VALUES(einstand_gesamt_netto) > 0, VALUES(einstand_gesamt_netto), einstand_gesamt_netto)
+                einstand_gesamt_netto = IF(VALUES(einstand_gesamt_netto) > 0, VALUES(einstand_gesamt_netto), einstand_gesamt_netto),
+                zahlungsart = IF(VALUES(zahlungsart) != '', VALUES(zahlungsart), zahlungsart),
+                quelle = IF(VALUES(quelle) IS NOT NULL AND VALUES(quelle) != '', VALUES(quelle), quelle),
+                mail_account = IF(VALUES(mail_account) IS NOT NULL AND VALUES(mail_account) != '', VALUES(mail_account), mail_account)
             """
 
             kaufdatum = data_dict.get("kaufdatum") or None
@@ -463,6 +467,10 @@ class OrderProcessingMixin:
                 bool(kosten_meta.get("reverse_charge", False)),
                 "aktiv",
                 self._round_money(kosten_meta.get("einstand_gesamt_netto", 0.0)),
+                str(data_dict.get("zahlungsart", "")).strip(),
+                str(data_dict.get("quelle", "")).strip() or None,
+                str(data_dict.get("mail_uid", "")).strip() or None,
+                str(data_dict.get("mail_account", "")).strip() or None,
             ))
 
             cursor.execute("SELECT id FROM einkauf_bestellungen WHERE bestellnummer = %s", (bestellnummer,))

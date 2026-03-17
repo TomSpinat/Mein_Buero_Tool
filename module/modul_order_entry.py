@@ -1440,6 +1440,9 @@ class OrderEntryApp(QWidget):
                     self.inputs["bestellnummer"].setText(new_no)
 
             try:
+                has_scan = bool(self.current_gemini_data.get("_scan_sources") or self.current_gemini_data.get("_provider_meta"))
+                self.current_gemini_data["quelle"] = "modul1_scan" if has_scan else "modul1_manual"
+
                 save_result = EinkaufPipeline.confirm_and_save_single(
                     self,
                     self.settings_manager,
