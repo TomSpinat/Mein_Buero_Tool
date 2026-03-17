@@ -126,6 +126,10 @@ class SchemaManagementMixin:
                 cursor_db.execute("ALTER TABLE einkauf_bestellungen ADD COLUMN einstand_gesamt_netto DECIMAL(10,2)")
             except Error:
                 pass
+            try:
+                cursor_db.execute("ALTER TABLE einkauf_bestellungen ADD COLUMN wareneingang_datum DATE")
+            except Error:
+                pass
 
             cursor_db.execute(
                 f"""
