@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPushButton,
     QTableWidget,
@@ -804,6 +805,91 @@ class InlineChangeFieldRow(QWidget):
         self.btn_old.setText(format_review_value(self._old_value))
         self.edit_new.set_committed_text(str(self.normal_input.text() or "").strip() or format_review_value(self._new_value))
         self._apply_compare_styles()
+
+    # ── Inline-Suggestion-Dropdown ──────────────────────────────────────
+
+    def set_suggestion_dropdown(self, suggestions: list):
+        """Zeigt ein gelbes Feld mit Dropdown-Pfeil und Vorschlaegen.
+
+        Der User kann einen Vorschlag waehlen oder den Wert manuell eingeben.
+        """
+        self._suggestions = list(suggestions or [])
+        if not self._suggestions:
+            return
+
+        # Sicherstellen, dass Normal-Mode aktiv ist
+        if self._display_mode == "compare":
+            self.clear_review_change(self.text())
+
+        # Dropdown-Button rechts im Feld
+        if not hasattr(self, "_btn_suggest"):
+            self._btn_suggest = QPushButton("▼")
+            self._btn_suggest.setFixedSize(28, 28)
+            self._btn_suggest.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._btn_suggest.setStyleSheet(
+                "QPushButton { background-color: #3a3117; color: #f7c66f; border: 1px solid #f7c66f;"
+                " border-radius: 4px; font-size: 14px; font-weight: bold; }"
+                "QPushButton:hover { background-color: #4a4127; }"
+            )
+            self._btn_suggest.clicked.connect(self._show_suggestion_menu)
+            # In das Layout neben dem Input einfuegen
+            parent_layout = self.layout()
+            if parent_layout:
+                parent_layout.addWidget(self._btn_suggest)
+
+        self._btn_suggest.setVisible(True)
+
+        # Feld gelb markieren
+        self.normal_input.setStyleSheet(
+            "QLineEdit { background-color: #2e2a1a; color: #f7c66f;"
+            " border: 2px solid #f7c66f; border-radius: 4px; padding: 6px; }"
+        )
+
+    def _show_suggestion_menu(self):
+        """Zeigt das Dropdown-Menu mit den Vorschlaegen."""
+        if not hasattr(self, "_suggestions") or not self._suggestions:
+            return
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            "QMenu { background-color: #24283b; color: #c0caf5; border: 1px solid #414868; }"
+            "QMenu::item:selected { background-color: #3a4160; }"
+            "QMenu::item { padding: 6px 16px; }"
+        )
+        for suggestion in self._suggestions:
+            action = menu.addAction(str(suggestion))
+            action.triggered.connect(lambda checked, s=suggestion: self._apply_suggestion(s))
+
+        menu.addSeparator()
+        edit_action = menu.addAction("Eigenen Wert eingeben...")
+        edit_action.triggered.connect(self._enable_manual_input)
+
+        # Menu unter dem Button oeffnen
+        btn = self._btn_suggest
+        menu.exec(btn.mapToGlobal(btn.rect().bottomLeft()))
+
+    def _apply_suggestion(self, value: str):
+        """Wendet einen Suggestion-Wert an und entfernt den Dropdown."""
+        self.normal_input.setText(str(value or ""))
+        self._clear_suggestion_ui()
+        # returnPressed emittieren damit FieldLookupBinding den Lookup auslöst (z.B. Logo-Suche)
+        self.normal_input.returnPressed.emit()
+
+    def _enable_manual_input(self):
+        """Entfernt den Dropdown und macht das Feld editierbar."""
+        self._clear_suggestion_ui()
+        self.normal_input.setFocus()
+        self.normal_input.selectAll()
+
+    def _clear_suggestion_ui(self):
+        """Entfernt die gelbe Markierung und den Dropdown-Button."""
+        if hasattr(self, "_btn_suggest"):
+            self._btn_suggest.setVisible(False)
+        self._apply_normal_style()
+
+    def clear_suggestions(self):
+        """Oeffentliche Methode um den Suggestion-Modus komplett zu entfernen."""
+        self._suggestions = []
+        self._clear_suggestion_ui()
 
     def clear_review_change(self, value=None):
         current_value = self.text() if value is None else value

@@ -9,16 +9,20 @@ from __future__ import annotations
 
 import logging
 
-from PyQt6.QtCore import Qt, QSize, QTimer, pyqtSignal
+from PyQt6.QtCore import QDate, Qt, QSize, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QIcon, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
+    QDateEdit,
+    QDialog,
+    QDialogButtonBox,
     QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPushButton,
     QRadioButton,
@@ -113,6 +117,13 @@ class OrderCardWidget(QFrame):
         super().__init__(parent)
         self.order_id = order_id
         self._selected = False
+        # Suchbare Felder fuer die Filterung (case-insensitive)
+        self._search_text = " ".join([
+            str(order_data.get("bestellnummer") or ""),
+            str(order_data.get("shop_name") or ""),
+            str(order_data.get("tracking_nummer_einkauf") or ""),
+            str(order_data.get("paketdienst") or ""),
+        ]).lower()
         self.setStyleSheet(self._STYLE_NORMAL)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setMinimumHeight(96)
@@ -255,6 +266,18 @@ class OrderCardListPage(QWidget):
         header_row.addWidget(btn_refresh)
         root.addLayout(header_row)
 
+        # Suchfeld
+        self._search_input = QLineEdit()
+        self._search_input.setPlaceholderText("Bestellnr., Shop oder Tracking suchen...")
+        self._search_input.setClearButtonEnabled(True)
+        self._search_input.setStyleSheet(
+            "QLineEdit { background-color: #24283b; color: #c0caf5; border: 1px solid #414868;"
+            " border-radius: 6px; padding: 8px 12px; font-size: 13px; }"
+            "QLineEdit:focus { border: 1px solid #7aa2f7; }"
+        )
+        self._search_input.textChanged.connect(self._filter_cards)
+        root.addWidget(self._search_input)
+
         # Scrollbereich
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
@@ -300,6 +323,7 @@ class OrderCardListPage(QWidget):
 
     def reload(self):
         """Karten neu laden (z.B. nach Abschluss oder manuell)."""
+        self._search_input.clear()
         # Alte Karten entfernen
         for card in self._cards:
             self._cards_layout.removeWidget(card)
@@ -366,6 +390,21 @@ class OrderCardListPage(QWidget):
         if self._selected_order_id is not None:
             self.open_order.emit(self._selected_order_id)
 
+    def _filter_cards(self, text: str):
+        """Filtert die Karten nach dem eingegebenen Suchtext."""
+        query = str(text or "").strip().lower()
+        visible_count = 0
+        for card in self._cards:
+            matches = not query or query in card._search_text
+            card.setVisible(matches)
+            if matches:
+                visible_count += 1
+        self._lbl_empty.setVisible(visible_count == 0 and len(self._cards) > 0)
+        if visible_count == 0 and len(self._cards) > 0:
+            self._lbl_empty.setText("Keine Treffer fuer die Suche.")
+        elif not self._cards:
+            self._lbl_empty.setText("Keine offenen Sendungen vorhanden.")
+
     def selected_order_id(self) -> int | None:
         return self._selected_order_id
 
@@ -424,6 +463,31 @@ class OrderDetailPage(QWidget):
         preview_layout.addWidget(self._order_visual_preview, 0, Qt.AlignmentFlag.AlignVCenter)
         preview_layout.addWidget(self._lbl_visual_info, 1)
         root.addWidget(preview_frame)
+
+        # --- Tracking-Info-Banner ---
+        self._tracking_banner = QFrame()
+        self._tracking_banner.setStyleSheet(
+            "QFrame { background-color: #1f2335; border: 1px solid #414868; border-radius: 6px; padding: 4px 8px; }"
+        )
+        tracking_layout = QHBoxLayout(self._tracking_banner)
+        tracking_layout.setContentsMargins(10, 4, 10, 4)
+        tracking_layout.setSpacing(16)
+        self._lbl_tracking = QLabel("")
+        self._lbl_tracking.setStyleSheet("color: #a9b1d6; font-size: 12px; border: none;")
+        tracking_layout.addWidget(self._lbl_tracking)
+        tracking_layout.addStretch()
+        self._tracking_banner.hide()
+        root.addWidget(self._tracking_banner)
+
+        # --- Unitisierungs-Hinweis ---
+        self._unitize_hint = QLabel("")
+        self._unitize_hint.setWordWrap(True)
+        self._unitize_hint.setStyleSheet(
+            "color: #565f89; font-size: 12px; padding: 4px 8px;"
+            " background-color: #1a1f2e; border: 1px solid #30374d; border-radius: 4px;"
+        )
+        self._unitize_hint.hide()
+        root.addWidget(self._unitize_hint)
 
         # --- Modus-Auswahl ---
         mode_frame = QFrame()
@@ -520,15 +584,34 @@ class OrderDetailPage(QWidget):
             conn = self._db._get_connection()
             cursor = conn.cursor(dictionary=True)
 
-            # Kopfdaten für Titel
+            # Kopfdaten für Titel + Tracking-Info
             cursor.execute(
-                "SELECT bestellnummer, shop_name FROM einkauf_bestellungen WHERE id = %s",
+                "SELECT bestellnummer, shop_name, tracking_nummer_einkauf, paketdienst, kaufdatum"
+                " FROM einkauf_bestellungen WHERE id = %s",
                 (order_id,),
             )
             head = cursor.fetchone() or {}
             shop = str(head.get("shop_name") or "").strip() or "Unbekannter Shop"
             nr = str(head.get("bestellnummer") or "").strip()
             self._lbl_title.setText(f"{shop}  –  #{order_id}  {nr}")
+
+            # Tracking-Banner befuellen
+            tracking = str(head.get("tracking_nummer_einkauf") or "").strip()
+            paketdienst = str(head.get("paketdienst") or "").strip()
+            kaufdatum_raw = head.get("kaufdatum")
+            kaufdatum = kaufdatum_raw.strftime("%d.%m.%Y") if hasattr(kaufdatum_raw, "strftime") else str(kaufdatum_raw or "")
+            tracking_parts = []
+            if paketdienst:
+                tracking_parts.append(f"Paketdienst: {paketdienst}")
+            if tracking:
+                tracking_parts.append(f"Tracking: {tracking}")
+            if kaufdatum:
+                tracking_parts.append(f"Bestellt: {kaufdatum}")
+            if tracking_parts:
+                self._lbl_tracking.setText("  ·  ".join(tracking_parts))
+                self._tracking_banner.show()
+            else:
+                self._tracking_banner.hide()
 
             # Visual-Preview
             preview = self._order_visuals.build_order_preview(order_id, shop_name=shop)
@@ -553,6 +636,18 @@ class OrderDetailPage(QWidget):
             self.positionen = cursor.fetchall()
             cursor.close()
             conn.close()
+
+            # Unitisierungs-Hinweis: Zeigen wenn identische Produktnamen vorhanden
+            from collections import Counter
+            name_counts = Counter(str(p.get("produkt_name") or "") for p in self.positionen)
+            has_duplicates = any(c > 1 for c in name_counts.values())
+            if has_duplicates and len(self.positionen) > 1:
+                self._unitize_hint.setText(
+                    "Hinweis: Positionen mit Menge >1 wurden einzeln aufgelistet fuer stueckgenaue Pruefung."
+                )
+                self._unitize_hint.show()
+            else:
+                self._unitize_hint.hide()
 
             self._render_table()
         except Exception as exc:
@@ -674,18 +769,15 @@ class OrderDetailPage(QWidget):
                     found_idx = idx
                     break
         if found_idx == -1:
-            # --- Reverse-Lookup: EAN in lokaler DB nachschlagen ---
-            lookup_result = self._parent_app_lookup_service().reverse_lookup_ean_to_name(ean)
-            if lookup_result.found:
-                name = lookup_result.data.get("produkt_name", ean)
-                self._lbl_status.setText(
-                    f"\u26a0 EAN nicht in dieser Bestellung. DB-Treffer: {name}"
-                )
-                self._lbl_status.setStyleSheet(
-                    "color: #e0af68; font-size: 14px; font-weight: bold;"
-                )
+            # EAN nicht gefunden → Dropdown mit offenen Positionen anbieten
+            open_positions = [
+                (idx, pos) for idx, pos in enumerate(self.positionen)
+                if pos["menge_geliefert"] < pos["menge"]
+            ]
+            if open_positions:
+                self._show_scan_fallback_menu(ean, open_positions)
             else:
-                self._lbl_status.setText("\u274c EAN nicht gefunden oder bereits vollzaehlig!")
+                self._lbl_status.setText("\u274c Alle Positionen bereits vollzaehlig!")
                 self._lbl_status.setStyleSheet(
                     "color: #f7768e; font-size: 14px; font-weight: bold;"
                 )
@@ -693,6 +785,78 @@ class OrderDetailPage(QWidget):
             self._lbl_status.setText(f"\u2705 EAN erkannt! {self.positionen[found_idx]['produkt_name']}")
             self._lbl_status.setStyleSheet("color: #9ece6a; font-size: 14px; font-weight: bold;")
             self._change_amount(found_idx, 1)
+
+    def _show_scan_fallback_menu(self, scanned_ean: str, open_positions: list):
+        """Zeigt ein Dropdown mit offenen Positionen wenn die EAN nicht zugeordnet werden konnte."""
+        self._lbl_status.setText(f"\u26a0 EAN '{scanned_ean}' nicht erkannt – Position manuell zuordnen:")
+        self._lbl_status.setStyleSheet("color: #e0af68; font-size: 14px; font-weight: bold;")
+
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            "QMenu { background-color: #24283b; color: #c0caf5; border: 1px solid #414868; }"
+            "QMenu::item:selected { background-color: #3a4160; }"
+            "QMenu::item { padding: 8px 16px; }"
+        )
+        for idx, pos in open_positions:
+            name = str(pos.get("produkt_name") or "?")
+            variant = str(pos.get("varianten_info") or "").strip()
+            label = f"{name} [{variant}]" if variant else name
+            offen = pos["menge"] - pos["menge_geliefert"]
+            action = menu.addAction(f"{label}  (noch {offen} offen)")
+            action.triggered.connect(
+                lambda checked, i=idx, e=scanned_ean: self._apply_scan_fallback(i, e)
+            )
+
+        menu.addSeparator()
+        cancel = menu.addAction("Abbrechen")
+        cancel.triggered.connect(lambda: self._lbl_status.setText(""))
+
+        # Menu unter dem Scanner-Feld oeffnen
+        menu.exec(self._txt_scanner.mapToGlobal(self._txt_scanner.rect().bottomLeft()))
+
+    def _apply_scan_fallback(self, row_idx: int, scanned_ean: str):
+        """Ordnet die gescannte EAN einer Position zu und lernt sie fuer die Zukunft."""
+        pos = self.positionen[row_idx]
+        name = str(pos.get("produkt_name") or "")
+
+        # EAN in DB lernen
+        self._learn_ean_for_position(pos, scanned_ean)
+
+        # Position als geliefert zaehlen
+        self._change_amount(row_idx, 1)
+        self._lbl_status.setText(f"\u2705 Zugeordnet: {name} ← EAN {scanned_ean} (gelernt)")
+        self._lbl_status.setStyleSheet("color: #9ece6a; font-size: 14px; font-weight: bold;")
+
+    def _learn_ean_for_position(self, pos: dict, ean: str):
+        """Speichert die EAN fuer die Position in waren_positionen und ean_katalog."""
+        try:
+            conn = self._db._get_connection()
+            cursor = conn.cursor()
+            # EAN in der Position aktualisieren
+            cursor.execute(
+                "UPDATE waren_positionen SET ean = %s WHERE id = %s AND (ean IS NULL OR ean = '')",
+                (ean, pos["id"]),
+            )
+            # EAN im lokalen Positions-Cache aktualisieren
+            pos["ean"] = ean
+
+            # In ean_katalog eintragen fuer zukuenftige Lookups
+            produkt_name = str(pos.get("produkt_name") or "").strip()
+            varianten_info = str(pos.get("varianten_info") or "").strip()
+            if produkt_name and ean:
+                cursor.execute(
+                    """
+                    INSERT INTO ean_katalog (produkt_name, varianten_info, ean, quelle, confidence)
+                    VALUES (%s, %s, %s, 'wareneingang_scan', 0.8)
+                    ON DUPLICATE KEY UPDATE last_seen_at = NOW()
+                    """,
+                    (produkt_name, varianten_info, ean),
+                )
+            conn.commit()
+            cursor.close()
+            conn.close()
+        except Exception as exc:
+            log_exception(__name__, exc)
 
     def _parent_app_lookup_service(self) -> LookupService:
         """Holt den LookupService vom Parent (WareneingangApp)."""
@@ -714,12 +878,98 @@ class OrderDetailPage(QWidget):
     def _finish_inbound(self):
         if not self.current_order_id:
             return
+
+        # Zusammenfassung erstellen
+        total = len(self.positionen)
+        complete = sum(1 for p in self.positionen if p["menge_geliefert"] >= p["menge"])
+        partial = sum(1 for p in self.positionen if 0 < p["menge_geliefert"] < p["menge"])
+        missing = sum(1 for p in self.positionen if p["menge_geliefert"] == 0)
+
+        # Bestaetigungsdialog
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Wareneingang abschliessen")
+        dlg.setMinimumWidth(420)
+        dlg.setStyleSheet(
+            "QDialog { background-color: #1a1b26; }"
+            "QLabel { color: #c0caf5; }"
+        )
+        dlg_layout = QVBoxLayout(dlg)
+        dlg_layout.setSpacing(12)
+
+        lbl_title = QLabel("Wareneingang abschliessen?")
+        lbl_title.setStyleSheet("font-size: 16px; font-weight: bold; color: #7aa2f7;")
+        dlg_layout.addWidget(lbl_title)
+
+        # Zusammenfassungs-Frame
+        summary_frame = QFrame()
+        summary_frame.setStyleSheet(
+            "QFrame { background-color: #24283b; border: 1px solid #414868; border-radius: 6px; padding: 8px; }"
+        )
+        summary_layout = QVBoxLayout(summary_frame)
+        summary_layout.setSpacing(4)
+
+        summary_layout.addWidget(QLabel(f"Positionen gesamt: {total}"))
+        lbl_ok = QLabel(f"  Vollzaehlig: {complete}")
+        lbl_ok.setStyleSheet("color: #9ece6a; border: none;")
+        summary_layout.addWidget(lbl_ok)
+        if partial:
+            lbl_partial = QLabel(f"  Teilweise: {partial}")
+            lbl_partial.setStyleSheet("color: #e0af68; border: none;")
+            summary_layout.addWidget(lbl_partial)
+        if missing:
+            lbl_missing = QLabel(f"  Fehlend: {missing}")
+            lbl_missing.setStyleSheet("color: #f7768e; border: none;")
+            summary_layout.addWidget(lbl_missing)
+        dlg_layout.addWidget(summary_frame)
+
+        # Eingangsdatum
+        date_row = QHBoxLayout()
+        lbl_date = QLabel("Eingangsdatum:")
+        lbl_date.setStyleSheet("font-size: 13px;")
+        date_row.addWidget(lbl_date)
+        date_edit = QDateEdit()
+        date_edit.setCalendarPopup(True)
+        date_edit.setDate(QDate.currentDate())
+        date_edit.setDisplayFormat("dd.MM.yyyy")
+        date_edit.setStyleSheet(
+            "QDateEdit { background-color: #24283b; color: #c0caf5; border: 1px solid #414868;"
+            " border-radius: 4px; padding: 4px 8px; }"
+        )
+        date_row.addWidget(date_edit)
+        date_row.addStretch()
+        dlg_layout.addLayout(date_row)
+
+        # Buttons
+        btn_box = QDialogButtonBox()
+        btn_ok = btn_box.addButton("Abschliessen", QDialogButtonBox.ButtonRole.AcceptRole)
+        btn_ok.setStyleSheet(
+            "QPushButton { background-color: #9ece6a; color: #1a1b26; border: none;"
+            " border-radius: 4px; padding: 6px 20px; font-weight: bold; }"
+            "QPushButton:hover { background-color: #b5e08a; }"
+        )
+        btn_cancel = btn_box.addButton("Abbrechen", QDialogButtonBox.ButtonRole.RejectRole)
+        btn_cancel.setStyleSheet(
+            "QPushButton { background-color: #24283b; color: #a9b1d6; border: 1px solid #414868;"
+            " border-radius: 4px; padding: 6px 20px; }"
+            "QPushButton:hover { background-color: #2a3050; }"
+        )
+        btn_box.accepted.connect(dlg.accept)
+        btn_box.rejected.connect(dlg.reject)
+        dlg_layout.addWidget(btn_box)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        # Eingangsdatum als Python-date
+        selected_date = date_edit.date().toPyDate()
+
         try:
             conn = self._db._get_connection()
             cursor = conn.cursor()
+            # Sendungsstatus + Eingangsdatum setzen
             cursor.execute(
-                "UPDATE einkauf_bestellungen SET sendungsstatus = %s WHERE id = %s",
-                (shipment_db_value(ShipmentStatus.DELIVERED), self.current_order_id),
+                "UPDATE einkauf_bestellungen SET sendungsstatus = %s, wareneingang_datum = %s WHERE id = %s",
+                (shipment_db_value(ShipmentStatus.DELIVERED), selected_date, self.current_order_id),
             )
             cursor.execute(
                 "UPDATE waren_positionen SET status = %s WHERE einkauf_id = %s",

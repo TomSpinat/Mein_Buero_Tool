@@ -145,6 +145,55 @@ class EinkaufPipeline:
         return EinkaufPipeline.run_mapping_workflow_with_dialogs(parent, workflow)
 
     @staticmethod
+    def normalize_einkauf_result_inline(result_dict):
+        """Inline-Variante: Statt Dialoge werden Suggestions im Payload gespeichert.
+
+        Gibt payload mit ``_field_suggestions`` zurueck, z.B.::
+
+            {"shop_name": ["Amazon DE", "Amazon FR", ...],
+             "zahlungsart": ["PayPal", "Kreditkarte", ...]}
+
+        Das aufrufende UI zeigt dann Inline-Dropdowns statt modaler Pop-ups.
+        """
+        from module.amazon_country_dialog import AMAZON_OPTIONS, is_generic_amazon_shop
+        from module.normalization_dialog import load_mapping
+
+        if not isinstance(result_dict, dict):
+            return result_dict
+
+        workflow = EinkaufPipeline.prepare_mapping_workflow(result_dict)
+        payload = dict(workflow.get("payload", {}) or {})
+        tasks = list(workflow.get("tasks", []) or [])
+
+        if not tasks:
+            return payload
+
+        suggestions = {}
+        mapping_data = load_mapping()
+
+        for task in tasks:
+            task_type = str(task.get("task_type", "") or "").strip()
+            field = str(task.get("field", "") or "").strip()
+            category = str(task.get("category", "") or "").strip()
+            raw_value = str(task.get("raw_value", "") or "").strip()
+
+            if task_type == "amazon_country":
+                # Amazon-Laender als Vorschlaege
+                suggestions[field] = [label for label, _flag in AMAZON_OPTIONS if label != "Anderer Amazon Shop"]
+            elif task_type == "normalization":
+                # Alle bekannten Standard-Werte dieser Kategorie als Vorschlaege
+                known_mappings = mapping_data.get(category, {}) or {}
+                standard_values = sorted(set(str(v) for v in known_mappings.values() if v))
+                if standard_values:
+                    suggestions[field] = standard_values
+                else:
+                    # Keine bekannten Werte → leere Liste, Feld bleibt editierbar
+                    suggestions[field] = []
+
+        payload["_field_suggestions"] = suggestions
+        return payload
+
+    @staticmethod
     def sanitize_einkauf_payload(item):
         """
         Entfernt interne Felder (mit _-Prefix) aus Kopf und Warenliste.
