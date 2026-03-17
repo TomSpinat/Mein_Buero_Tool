@@ -51,6 +51,7 @@ EINKAUF_FIELD_SECTIONS = (
         "Lieferung",
         (
             ("tracking_nummer_einkauf", "Tracking Code"),
+            ("paketdienst", "Paketdienst"),
             ("sendungsstatus", "Sendungsstatus"),
             ("lieferdatum", "Lieferdatum"),
         ),
@@ -91,6 +92,7 @@ CHANGE_COLORS = {
     "item_add": {"bg": "#203225", "fg": "#9ece6a"},
     "overwrite": {"bg": "#3a3117", "fg": "#f7c66f"},
     "item_update": {"bg": "#3a3117", "fg": "#f7c66f"},
+    "mapped": {"bg": "#2e2a1a", "fg": "#f7c66f"},
     "unchanged": {"bg": "#24283b", "fg": "#c0caf5"},
 }
 ITEM_STATUS_STYLES = {
@@ -603,6 +605,76 @@ class _UiMediaPreviewResolver:
             "tooltip": str(candidate.get("source_label", "") or candidate.get("source_ref", "") or "Bildkandidat"),
         }
 
+class SummenBannerWidget(QFrame):
+    """Wiederverwendbares Banner: Berechneter Warenwert vs. KI-Gesamtpreis mit Abweichungswarnung."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet(
+            "QFrame { background-color: #202233; border: 1px solid #414868; border-radius: 6px; }"
+        )
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 6, 12, 6)
+        layout.setSpacing(16)
+
+        self.lbl_berechnet = QLabel("Berechnet: --")
+        self.lbl_berechnet.setStyleSheet("color: #c0caf5; font-size: 12px; border: none;")
+        layout.addWidget(self.lbl_berechnet)
+
+        self.lbl_ki = QLabel("KI-Gesamtpreis: --")
+        self.lbl_ki.setStyleSheet("color: #a9b1d6; font-size: 12px; border: none;")
+        layout.addWidget(self.lbl_ki)
+
+        self.lbl_warnung = QLabel("")
+        self.lbl_warnung.setStyleSheet("color: #f7c66f; font-size: 12px; font-weight: bold; border: none;")
+        layout.addWidget(self.lbl_warnung)
+
+        layout.addStretch()
+        self.setVisible(False)
+
+    def update_from_items(self, items, gesamt_ekp_brutto=None):
+        """Berechnet Warenwert aus Artikelliste und vergleicht mit KI-Gesamtpreis.
+
+        items: list of dicts with 'menge' and 'ekp_brutto' keys
+        gesamt_ekp_brutto: KI-erkannter Gesamtpreis (float or str)
+        """
+        if not items:
+            self.setVisible(False)
+            return
+
+        warenwert = 0.0
+        for item in items:
+            try:
+                menge = float(str(item.get("menge", 1) or 1).replace(",", "."))
+                preis = float(str(item.get("ekp_brutto", 0) or 0).replace(",", "."))
+                warenwert += menge * preis
+            except (ValueError, TypeError):
+                pass
+
+        self.lbl_berechnet.setText(f"Berechnet: {warenwert:.2f} EUR")
+
+        ki_gesamt = 0.0
+        try:
+            ki_gesamt = float(str(gesamt_ekp_brutto or 0).replace(",", "."))
+        except (ValueError, TypeError):
+            pass
+
+        if ki_gesamt > 0:
+            self.lbl_ki.setText(f"KI-Gesamtpreis: {ki_gesamt:.2f} EUR")
+            self.lbl_ki.setVisible(True)
+            delta = abs(warenwert - ki_gesamt)
+            if delta > 0.02:
+                self.lbl_warnung.setText(f"Abweichung: {delta:.2f} EUR")
+                self.lbl_warnung.setVisible(True)
+            else:
+                self.lbl_warnung.setVisible(False)
+        else:
+            self.lbl_ki.setVisible(False)
+            self.lbl_warnung.setVisible(False)
+
+        self.setVisible(True)
+
+
 class InlineChangeFieldRow(QWidget):
     # Proxy signal so FieldLookupBinding can connect to returnPressed
     # exactly like it would on a plain QLineEdit.
@@ -713,34 +785,64 @@ class InlineChangeFieldRow(QWidget):
         self._apply_normal_style(change_kind)
 
     def _kind_palette(self):
+        if self._change_kind == "mapped":
+            return {
+                "accent": "#f7c66f", "bg": "#2e2a1a", "text": "#f7c66f",
+                "hint": "Automatisch gemappt (mapping.json). Wert kann angepasst werden.",
+                "old_bg": "#1a1b26", "old_fg": "#6b7280", "old_border": "1px solid #30374d",
+            }
         return {"accent": "#f7a34b", "bg": "#3a3117", "text": "#f7c66f", "hint": "Neuer Wert wuerde den vorhandenen DB-Wert aendern."}
 
     def _apply_compare_styles(self):
         palette = self._kind_palette()
-        inactive_border = "1px solid #414868"
-        active_border = f"2px solid {palette['accent']}"
-        old_border = active_border if self._selected_side == "old" else inactive_border
-        new_border = active_border if self._selected_side == "new" else inactive_border
-        old_bg = palette["bg"] if self._selected_side == "old" else "#171824"
-        new_bg = palette["bg"] if self._selected_side == "new" else "#171824"
-        old_fg = palette["text"] if self._selected_side == "old" else "#c0caf5"
-        new_fg = palette["text"] if self._selected_side == "new" else "#c0caf5"
+        is_mapped = self._change_kind == "mapped"
 
-        self.btn_old.setStyleSheet(
-            "QPushButton {"
-            f"background-color: {old_bg}; color: {old_fg}; border: {old_border}; border-radius: 6px; padding: 6px 10px; text-align: left;"
-            "}"
-            "QPushButton:disabled { color: #6b7280; border-color: #30374d; }"
-        )
-        self.edit_new.setStyleSheet(
-            "QLineEdit {"
-            f"background-color: {new_bg}; color: {new_fg}; border: {new_border}; border-radius: 6px; padding: 6px 10px;"
-            "}"
-        )
-        self.lbl_old_indicator.setVisible(self._selected_side == "old")
-        self.lbl_new_indicator.setVisible(self._selected_side == "new")
-        self.lbl_old_indicator.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {palette['accent']};")
-        self.lbl_new_indicator.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {palette['accent']};")
+        if is_mapped:
+            # Mapped mode: left side is always gray/disabled, right side is always active yellow
+            self.btn_old.setEnabled(False)
+            self.btn_old.setStyleSheet(
+                "QPushButton {"
+                f"background-color: {palette['old_bg']}; color: {palette['old_fg']}; border: {palette['old_border']};"
+                " border-radius: 6px; padding: 6px 10px; text-align: left;"
+                "}"
+                f"QPushButton:disabled {{ color: {palette['old_fg']}; border-color: #30374d; background-color: {palette['old_bg']}; }}"
+            )
+            self.edit_new.setStyleSheet(
+                "QLineEdit {"
+                f"background-color: {palette['bg']}; color: {palette['text']}; border: 2px solid {palette['accent']};"
+                " border-radius: 6px; padding: 6px 10px;"
+                "}"
+            )
+            self.lbl_old_indicator.setVisible(False)
+            self.lbl_new_indicator.setVisible(True)
+            self.lbl_new_indicator.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {palette['accent']};")
+        else:
+            self.btn_old.setEnabled(True)
+            inactive_border = "1px solid #414868"
+            active_border = f"2px solid {palette['accent']}"
+            old_border = active_border if self._selected_side == "old" else inactive_border
+            new_border = active_border if self._selected_side == "new" else inactive_border
+            old_bg = palette["bg"] if self._selected_side == "old" else "#171824"
+            new_bg = palette["bg"] if self._selected_side == "new" else "#171824"
+            old_fg = palette["text"] if self._selected_side == "old" else "#c0caf5"
+            new_fg = palette["text"] if self._selected_side == "new" else "#c0caf5"
+
+            self.btn_old.setStyleSheet(
+                "QPushButton {"
+                f"background-color: {old_bg}; color: {old_fg}; border: {old_border}; border-radius: 6px; padding: 6px 10px; text-align: left;"
+                "}"
+                "QPushButton:disabled { color: #6b7280; border-color: #30374d; }"
+            )
+            self.edit_new.setStyleSheet(
+                "QLineEdit {"
+                f"background-color: {new_bg}; color: {new_fg}; border: {new_border}; border-radius: 6px; padding: 6px 10px;"
+                "}"
+            )
+            self.lbl_old_indicator.setVisible(self._selected_side == "old")
+            self.lbl_new_indicator.setVisible(self._selected_side == "new")
+            self.lbl_old_indicator.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {palette['accent']};")
+            self.lbl_new_indicator.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {palette['accent']};")
+
         self.lbl_compare_hint.setText(palette["hint"])
 
     def _select_old(self):
@@ -767,6 +869,8 @@ class InlineChangeFieldRow(QWidget):
 
     def text(self):
         if self._display_mode == "compare":
+            if self._change_kind == "mapped":
+                return str(self.edit_new.text() or "")
             if self._selected_side == "old":
                 return str(self._old_value or "")
             return str(self.edit_new.text() or "")
@@ -804,6 +908,26 @@ class InlineChangeFieldRow(QWidget):
         self.compare_widget.setVisible(True)
         self.btn_old.setText(format_review_value(self._old_value))
         self.edit_new.set_committed_text(str(self.normal_input.text() or "").strip() or format_review_value(self._new_value))
+        self._apply_compare_styles()
+
+    # ── Auto-Mapping-Anzeige ─────────────────────────────────────────────
+
+    def set_mapping_change(self, raw_value, resolved_value):
+        """Zeigt eine Auto-Mapping-Transformation: grauer Rohwert -> gelber gemappter Wert.
+
+        Der Rohwert (links) ist nur informativ und nicht klickbar.
+        Der gemappte Wert (rechts) ist editierbar und wird beim Speichern uebernommen.
+        """
+        self._change_kind = "mapped"
+        self._old_value = "" if raw_value is None else str(raw_value)
+        self._new_value = "" if resolved_value is None else str(resolved_value)
+        self._selected_side = "new"
+
+        self._display_mode = "compare"
+        self.normal_input.setVisible(False)
+        self.compare_widget.setVisible(True)
+        self.btn_old.setText(format_review_value(self._old_value))
+        self.edit_new.set_committed_text(format_review_value(self._new_value))
         self._apply_compare_styles()
 
     # ── Inline-Suggestion-Dropdown ──────────────────────────────────────
@@ -1138,6 +1262,15 @@ class EinkaufHeadFormWidget(QWidget):
         for key in EINKAUF_VISIBLE_FIELD_KEYS:
             self.inputs[key].setText(str(payload.get(key, "") or ""))
         self.chk_reverse_charge.setChecked(bool(payload.get("reverse_charge", False)))
+
+        auto_mapped = payload.get("_auto_mapped_fields") or {}
+        for key, mapping_info in auto_mapped.items():
+            if key in self.inputs and isinstance(mapping_info, dict):
+                raw = str(mapping_info.get("raw", "") or "")
+                resolved = str(mapping_info.get("resolved", "") or "")
+                if raw and resolved:
+                    self.inputs[key].set_mapping_change(raw, resolved)
+
         self._update_shop_preview(payload)
         self.set_extra_values(payload)
 
@@ -1845,6 +1978,7 @@ class ItemReviewDetailWidget(QFrame):
 
 class EinkaufItemsTableWidget(QWidget):
     imageSearchRequested = pyqtSignal(object)
+    eanLookupRequested = pyqtSignal(dict)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1910,6 +2044,20 @@ class EinkaufItemsTableWidget(QWidget):
         self.table.setColumnWidth(7, 110)
         self.table.setColumnWidth(8, 112)
         self.table.setColumnWidth(9, 104)
+
+        btn_row = QHBoxLayout()
+        self.btn_ean_lookup = QPushButton("EAN suchen (markierte Zeile)")
+        self.btn_ean_lookup.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_ean_lookup.setStyleSheet("font-size: 12px; padding: 4px 10px;")
+        self.btn_ean_lookup.clicked.connect(self._on_ean_lookup_clicked)
+        btn_row.addWidget(self.btn_ean_lookup)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
+    def _on_ean_lookup_clicked(self):
+        context = self.get_selected_context()
+        if context:
+            self.eanLookupRequested.emit(context)
 
     def clear_items(self):
         self._items = []

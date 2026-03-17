@@ -131,6 +131,23 @@ class SchemaManagementMixin:
             except Error:
                 pass
 
+            try:
+                cursor_db.execute("ALTER TABLE einkauf_bestellungen ADD COLUMN zahlungsart VARCHAR(255)")
+            except Error:
+                pass
+            try:
+                cursor_db.execute("ALTER TABLE einkauf_bestellungen ADD COLUMN quelle VARCHAR(100)")
+            except Error:
+                pass
+            try:
+                cursor_db.execute("ALTER TABLE einkauf_bestellungen ADD COLUMN mail_uid VARCHAR(255)")
+            except Error:
+                pass
+            try:
+                cursor_db.execute("ALTER TABLE einkauf_bestellungen ADD COLUMN mail_account VARCHAR(255)")
+            except Error:
+                pass
+
             cursor_db.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS verkauf_tickets (

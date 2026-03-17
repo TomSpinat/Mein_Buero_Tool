@@ -42,12 +42,15 @@ class EinkaufPipeline:
         """
         payload = dict(result_dict or {})
         tasks = []
+        auto_mapped = {}
 
         raw_shop = str(payload.get("shop_name", "") or "").strip()
         if raw_shop:
             known_shop = resolve_known_mapping("shops", raw_shop)
             if known_shop is not None:
                 payload["shop_name"] = known_shop
+                if known_shop != raw_shop:
+                    auto_mapped["shop_name"] = {"raw": raw_shop, "resolved": known_shop}
             else:
                 normalized_amazon = normalize_amazon_shop_value(raw_shop)
                 if normalized_amazon != raw_shop and normalized_amazon.lower().startswith("amazon "):
@@ -80,6 +83,8 @@ class EinkaufPipeline:
             known_payment = resolve_known_mapping("zahlungsarten", raw_payment)
             if known_payment is not None:
                 payload["zahlungsart"] = known_payment
+                if known_payment != raw_payment:
+                    auto_mapped["zahlungsart"] = {"raw": raw_payment, "resolved": known_payment}
             else:
                 tasks.append(
                     {
@@ -93,6 +98,8 @@ class EinkaufPipeline:
         else:
             payload["zahlungsart"] = ""
 
+        if auto_mapped:
+            payload["_auto_mapped_fields"] = auto_mapped
         return {"payload": payload, "tasks": tasks}
 
     @staticmethod
@@ -215,6 +222,7 @@ class EinkaufPipeline:
             "_email_date",
             "_origin_module",
             "_screenshot_detections",
+            "_auto_mapped_fields",
         }
         clean_item = {
             k: v
