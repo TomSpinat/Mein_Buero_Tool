@@ -2187,54 +2187,93 @@ class ScraperReviewWizardDialog(QDialog):
     self.preview_tabs.addTab(attachment_tab, "PDF-Anhang")
     self.content_splitter.addWidget(left_panel)
 
-    self.data_scroll_area = QScrollArea(self)
-    self.data_scroll_area.setWidgetResizable(True)
-    self.data_scroll_area.setFrameShape(QFrame.Shape.NoFrame)
-    self.data_scroll_area.setMinimumWidth(480)
-    self.data_scroll_area.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+    # ── Tab-basiertes Mittel-Panel ────────────────────────────────────
+    self.data_tabs = QTabWidget(self)
+    self.data_tabs.setMinimumWidth(480)
+    self.data_tabs.setStyleSheet(
+        "QTabWidget::pane { border: 1px solid #414868; border-radius: 6px; background: transparent; }"
+        "QTabBar::tab { background: #1a1b26; color: #a9b1d6; padding: 8px 18px; border: 1px solid #414868; border-bottom: none; border-top-left-radius: 6px; border-top-right-radius: 6px; margin-right: 2px; }"
+        "QTabBar::tab:selected { background: #1f2335; color: #7aa2f7; font-weight: bold; }"
+        "QTabBar::tab:hover { background: #292e42; }"
+    )
 
-    data_panel = QWidget()
-    data_panel.setMinimumWidth(480)
-    data_box = QVBoxLayout(data_panel)
-    data_box.setContentsMargins(0, 0, 12, 0)
-    data_box.setSpacing(12)
-
-    lbl_data = QLabel("Extrahierte Felder")
-    lbl_data.setStyleSheet("font-size: 14px; font-weight: bold;")
-    data_box.addWidget(lbl_data)
+    # --- Tab 1: Kopfdaten ---
+    kopf_scroll = QScrollArea()
+    kopf_scroll.setWidgetResizable(True)
+    kopf_scroll.setFrameShape(QFrame.Shape.NoFrame)
+    kopf_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+    kopf_panel = QWidget()
+    kopf_box = QVBoxLayout(kopf_panel)
+    kopf_box.setContentsMargins(0, 8, 12, 0)
+    kopf_box.setSpacing(12)
 
     self.einkauf_form_widget = EinkaufHeadFormWidget(self)
     self.einkauf_form_widget.logoSearchRequested.connect(self._on_manual_logo_search_requested)
     self.inputs = self.einkauf_form_widget.inputs
     self.einkauf_form_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
-    data_box.addWidget(self.einkauf_form_widget)
+    kopf_box.addWidget(self.einkauf_form_widget)
+    kopf_box.addStretch(1)
+    kopf_scroll.setWidget(kopf_panel)
+    self.data_tabs.addTab(kopf_scroll, "Kopfdaten")
 
-    lbl_items = QLabel("Artikel")
-    lbl_items.setStyleSheet("font-size: 14px; font-weight: bold;")
-    data_box.addWidget(lbl_items)
+    # --- Tab 2: Artikel ---
+    artikel_scroll = QScrollArea()
+    artikel_scroll.setWidgetResizable(True)
+    artikel_scroll.setFrameShape(QFrame.Shape.NoFrame)
+    artikel_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+    artikel_panel = QWidget()
+    artikel_box = QVBoxLayout(artikel_panel)
+    artikel_box.setContentsMargins(0, 8, 12, 0)
+    artikel_box.setSpacing(12)
 
     self.einkauf_items_widget = EinkaufItemsTableWidget(self)
     self.einkauf_items_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
     self.einkauf_items_widget.table.setMinimumHeight(280)
     self.table_waren = self.einkauf_items_widget.table
-    data_box.addWidget(self.einkauf_items_widget, 1)
+    artikel_box.addWidget(self.einkauf_items_widget, 1)
 
     self.summen_banner = SummenBannerWidget(self)
-    data_box.addWidget(self.summen_banner)
+    artikel_box.addWidget(self.summen_banner)
 
     self.einkauf_items_widget.eanLookupRequested.connect(lambda _ctx: self._lookup_ean_for_selected_row())
 
-    lbl_review = QLabel("Kurzuebersicht")
-    lbl_review.setStyleSheet("font-size: 14px; font-weight: bold;")
-    data_box.addWidget(lbl_review)
+    # Zeilen-Management-Buttons
+    items_btn_row = QHBoxLayout()
+    self.btn_add_row = QPushButton("+ Zeile")
+    self.btn_add_row.setCursor(Qt.CursorShape.PointingHandCursor)
+    self.btn_add_row.setStyleSheet("font-size: 12px; padding: 4px 10px;")
+    self.btn_add_row.clicked.connect(self._on_add_item_row)
+    items_btn_row.addWidget(self.btn_add_row)
+    self.btn_remove_row = QPushButton("- Zeile")
+    self.btn_remove_row.setCursor(Qt.CursorShape.PointingHandCursor)
+    self.btn_remove_row.setStyleSheet("font-size: 12px; padding: 4px 10px;")
+    self.btn_remove_row.clicked.connect(self._on_remove_item_row)
+    items_btn_row.addWidget(self.btn_remove_row)
+    items_btn_row.addStretch()
+    artikel_box.addLayout(items_btn_row)
+
+    artikel_scroll.setWidget(artikel_panel)
+    self.data_tabs.addTab(artikel_scroll, "Artikel")
+
+    # --- Tab 3: Uebersicht ---
+    uebersicht_scroll = QScrollArea()
+    uebersicht_scroll.setWidgetResizable(True)
+    uebersicht_scroll.setFrameShape(QFrame.Shape.NoFrame)
+    uebersicht_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+    uebersicht_panel = QWidget()
+    uebersicht_box = QVBoxLayout(uebersicht_panel)
+    uebersicht_box.setContentsMargins(0, 8, 12, 0)
+    uebersicht_box.setSpacing(12)
 
     self.order_review_widget = OrderReviewPanelWidget(self)
     self.order_review_widget.setMinimumHeight(96)
-    data_box.addWidget(self.order_review_widget)
-    data_box.addStretch(1)
+    uebersicht_box.addWidget(self.order_review_widget)
 
-    self.data_scroll_area.setWidget(data_panel)
-    self.content_splitter.addWidget(self.data_scroll_area)
+    uebersicht_box.addStretch(1)
+    uebersicht_scroll.setWidget(uebersicht_panel)
+    self.data_tabs.addTab(uebersicht_scroll, "Uebersicht")
+
+    self.content_splitter.addWidget(self.data_tabs)
 
     mapping_panel = QWidget(self)
     mapping_panel.setMinimumWidth(300)
@@ -2819,6 +2858,9 @@ class ScraperReviewWizardDialog(QDialog):
     else:
       self.preview_tabs.setCurrentIndex(0)
 
+    # --- Tab auf Kopfdaten zuruecksetzen ---
+    self.data_tabs.setCurrentIndex(0)
+
     if self._mapping_done_by_index.get(self.current_index, False):
       self.mapping_frame.setVisible(False)
       self._clear_mapping_panel()
@@ -3034,6 +3076,31 @@ class ScraperReviewWizardDialog(QDialog):
     base = self.einkauf_form_widget.apply_to_payload(base)
     base["waren"] = self.einkauf_items_widget.get_items()
     return base
+  def _on_add_item_row(self):
+    """Fuegt eine leere Artikelzeile zur Items-Tabelle hinzu."""
+    try:
+      items = self.einkauf_items_widget.get_items()
+      items.append({"produkt_name": "", "varianten_info": "", "ean": "", "menge": "1", "ekp_brutto": "0.00"})
+      self.einkauf_items_widget.set_items(items)
+    except Exception as e:
+      logging.exception("Fehler beim Hinzufuegen einer Artikelzeile: %s", e)
+
+  def _on_remove_item_row(self):
+    """Entfernt die ausgewaehlte Artikelzeile."""
+    try:
+      context = self.einkauf_items_widget.get_selected_context()
+      if not context:
+        QMessageBox.information(self, "Zeile entfernen", "Bitte zuerst eine Zeile auswaehlen.")
+        return
+      row = int(context.get("row", -1))
+      items = self.einkauf_items_widget.get_items()
+      if row < 0 or row >= len(items):
+        return
+      items.pop(row)
+      self.einkauf_items_widget.set_items(items)
+    except Exception as e:
+      logging.exception("Fehler beim Entfernen einer Artikelzeile: %s", e)
+
   def _lookup_ean_for_selected_row(self):
     if self.ean_lookup_worker is not None and self.ean_lookup_worker.isRunning():
       QMessageBox.information(self, "EAN Suche", "Es laeuft bereits eine EAN-Suche im Hintergrund.")

@@ -50,10 +50,18 @@ EINKAUF_FIELD_SECTIONS = (
     (
         "Lieferung",
         (
+            ("sendungsstatus", "Sendungsstatus"),
             ("tracking_nummer_einkauf", "Tracking Code"),
             ("paketdienst", "Paketdienst"),
-            ("sendungsstatus", "Sendungsstatus"),
             ("lieferdatum", "Lieferdatum"),
+            ("wareneingang_datum", "Wareneingang"),
+        ),
+    ),
+    (
+        "Rechnung & Status",
+        (
+            ("rechnung_pdf_pfad", "Rechnungsdatei (Pfad)"),
+            ("storno_status", "Storno-Status"),
         ),
     ),
     (
@@ -82,10 +90,16 @@ EINKAUF_ITEM_MAIN_COLUMNS = (
     ("details", "Details"),
 )
 EINKAUF_ITEM_EDIT_KEYS = ("produkt_name", "varianten_info", "ean", "menge", "ekp_brutto")
-EINKAUF_ITEM_REVIEW_KEYS = EINKAUF_ITEM_EDIT_KEYS + ("bezugskosten_anteil_brutto", "einstand_brutto")
-EINKAUF_VISIBLE_FIELD_SET = set(EINKAUF_VISIBLE_FIELD_KEYS) | {"reverse_charge"}
+EINKAUF_ITEM_REVIEW_KEYS = EINKAUF_ITEM_EDIT_KEYS + (
+    "bezugskosten_anteil_brutto",
+    "einstand_brutto",
+    "menge_geliefert",
+    "seriennummern",
+    "zahlungsstatus",
+)
+EINKAUF_VISIBLE_FIELD_SET = set(EINKAUF_VISIBLE_FIELD_KEYS) | {"reverse_charge", "rechnung_vorhanden"}
 EINKAUF_TOP_LEVEL_ALLOWED = set(EINKAUF_FIELDS)
-NUMERIC_ITEM_KEYS = {"ekp_brutto", "bezugskosten_anteil_brutto", "einstand_brutto"}
+NUMERIC_ITEM_KEYS = {"ekp_brutto", "bezugskosten_anteil_brutto", "einstand_brutto", "menge_geliefert"}
 
 CHANGE_COLORS = {
     "add": {"bg": "#203225", "fg": "#9ece6a"},
@@ -1096,6 +1110,22 @@ class EinkaufHeadFormWidget(QWidget):
                 self.field_rows[key] = field_row
                 frame_layout.addWidget(field_row)
 
+            # Rechnung vorhanden Checkbox direkt im Rechnung & Status Block
+            if section_title == "Rechnung & Status":
+                chk_row = QHBoxLayout()
+                chk_row.setContentsMargins(0, 4, 0, 0)
+                chk_row.setSpacing(8)
+                lbl_rg_icon = QLabel("\U0001f9fe")
+                lbl_rg_icon.setStyleSheet("font-size: 15px;")
+                lbl_rg_icon.setToolTip("Gibt an ob eine Rechnung fuer diese Bestellung vorliegt.")
+                chk_row.addWidget(lbl_rg_icon)
+                self.chk_rechnung_vorhanden = QCheckBox("Rechnung vorhanden")
+                self.chk_rechnung_vorhanden.setStyleSheet("color: #c0caf5; font-size: 12px;")
+                self.chk_rechnung_vorhanden.setToolTip("Haken setzen sobald die Rechnung vorliegt.")
+                chk_row.addWidget(self.chk_rechnung_vorhanden)
+                chk_row.addStretch()
+                frame_layout.addLayout(chk_row)
+
             layout.addWidget(frame)
 
         # --- Reverse Charge Checkbox ---
@@ -1262,6 +1292,7 @@ class EinkaufHeadFormWidget(QWidget):
         for key in EINKAUF_VISIBLE_FIELD_KEYS:
             self.inputs[key].setText(str(payload.get(key, "") or ""))
         self.chk_reverse_charge.setChecked(bool(payload.get("reverse_charge", False)))
+        self.chk_rechnung_vorhanden.setChecked(bool(payload.get("rechnung_vorhanden", False)))
 
         auto_mapped = payload.get("_auto_mapped_fields") or {}
         for key, mapping_info in auto_mapped.items():
@@ -1318,6 +1349,7 @@ class EinkaufHeadFormWidget(QWidget):
         for key in EINKAUF_VISIBLE_FIELD_KEYS:
             updated[key] = self.inputs[key].text().strip()
         updated["reverse_charge"] = self.chk_reverse_charge.isChecked()
+        updated["rechnung_vorhanden"] = self.chk_rechnung_vorhanden.isChecked()
         return updated
 
     def clear_values(self):
@@ -1325,6 +1357,7 @@ class EinkaufHeadFormWidget(QWidget):
         for key in EINKAUF_VISIBLE_FIELD_KEYS:
             self.inputs[key].clear()
         self.chk_reverse_charge.setChecked(False)
+        self.chk_rechnung_vorhanden.setChecked(False)
         self._clear_extra_rows()
         self.extra_frame.setVisible(False)
         if self._logo_search_mode == "direct":

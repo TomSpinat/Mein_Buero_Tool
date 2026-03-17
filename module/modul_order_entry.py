@@ -47,7 +47,7 @@ from module.crash_logger import (
 from module.lookup_service import LookupService
 from module.lookup_results import FieldState, FieldType, LookupSource
 from module.field_lookup_binding import FieldLookupBinding, create_bindings
-from module.einkauf_ui import EinkaufHeadFormWidget, EinkaufItemsTableWidget, SummenBannerWidget, set_field_state
+from module.einkauf_ui import EinkaufHeadFormWidget, EinkaufItemsTableWidget, OrderReviewPanelWidget, SummenBannerWidget, set_field_state
 class GeminiWorker(QThread):
     finished_signal = pyqtSignal(dict)
     error_signal = pyqtSignal(str)
@@ -294,33 +294,56 @@ class OrderEntryApp(QWidget):
         self.lbl_form = QLabel("<h3>2. Kopfdaten (Einkauf)</h3>")
         right_layout.addWidget(self.lbl_form)
 
-        # --- EinkaufHeadFormWidget fuer Einkauf-Modus (InlineChangeFieldRow, Split-View) ---
+        # ── Tab-basiertes Daten-Panel (gleich wie Modul 2) ──────────────
+        self.data_tabs = QTabWidget()
+        self.data_tabs.setStyleSheet(
+            "QTabWidget::pane { border: 1px solid #414868; border-radius: 6px; background: transparent; }"
+            "QTabBar::tab { background: #1a1b26; color: #a9b1d6; padding: 8px 18px; border: 1px solid #414868; border-bottom: none; border-top-left-radius: 6px; border-top-right-radius: 6px; margin-right: 2px; }"
+            "QTabBar::tab:selected { background: #1f2335; color: #7aa2f7; font-weight: bold; }"
+            "QTabBar::tab:hover { background: #292e42; }"
+        )
+
+        # --- Tab 1: Kopfdaten ---
+        kopf_scroll = QScrollArea()
+        kopf_scroll.setWidgetResizable(True)
+        kopf_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        kopf_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        kopf_panel = QWidget()
+        kopf_box = QVBoxLayout(kopf_panel)
+        kopf_box.setContentsMargins(0, 8, 12, 0)
+        kopf_box.setSpacing(12)
+
         self.einkauf_form_widget = EinkaufHeadFormWidget(self, logo_search_mode="direct")
         self.einkauf_form_widget.logoSearchRequested.connect(self._start_logo_search_from_context)
+        self.einkauf_form_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        kopf_box.addWidget(self.einkauf_form_widget)
+        kopf_box.addStretch(1)
+        kopf_scroll.setWidget(kopf_panel)
+        self._einkauf_kopf_tab = kopf_scroll
+        self.data_tabs.addTab(kopf_scroll, "Kopfdaten")
 
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setWidget(self.einkauf_form_widget)
-        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
-        scroll_area.setMaximumHeight(420)
-        self._einkauf_form_scroll = scroll_area
-        right_layout.addWidget(self._einkauf_form_scroll)
+        # --- Tab 2: Artikel ---
+        artikel_scroll = QScrollArea()
+        artikel_scroll.setWidgetResizable(True)
+        artikel_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        artikel_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        artikel_panel = QWidget()
+        artikel_box = QVBoxLayout(artikel_panel)
+        artikel_box.setContentsMargins(0, 8, 12, 0)
+        artikel_box.setSpacing(12)
 
-        # --- Legacy QFormLayout-Container fuer Verkauf-Modus ---
-        self.form_layout_frame = QWidget()
-        _ff_layout = QVBoxLayout(self.form_layout_frame)
-        _ff_layout.setContentsMargins(0, 0, 0, 0)
-        self.form_layout = QFormLayout()
-        _ff_layout.addLayout(self.form_layout)
-        self.form_layout_frame.setVisible(False)
-        right_layout.addWidget(self.form_layout_frame)
+        self.einkauf_items_widget = EinkaufItemsTableWidget(self)
+        self.einkauf_items_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.einkauf_items_widget.table.setMinimumHeight(280)
+        self.einkauf_items_widget.eanLookupRequested.connect(lambda _ctx: self._lookup_ean_for_selected_row())
+        self.einkauf_items_widget.imageSearchRequested.connect(self._on_items_image_search_requested)
+        artikel_box.addWidget(self.einkauf_items_widget, 1)
 
-        # --- Artikel-Header (gemeinsam fuer Einkauf + Verkauf) ---
-        waren_header_row = QHBoxLayout()
-        lbl_waren = QLabel("<h3>3. Erfasste Artikel</h3>")
-        waren_header_row.addWidget(lbl_waren)
-        waren_header_row.addStretch()
+        self.summen_banner = SummenBannerWidget(self)
+        artikel_box.addWidget(self.summen_banner)
 
+        # Zeilen-Management-Buttons
+        items_btn_row = QHBoxLayout()
         self.btn_add_row = QPushButton("+ Zeile")
         self.btn_add_row.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_add_row.setStyleSheet(
@@ -329,7 +352,7 @@ class OrderEntryApp(QWidget):
             "QPushButton:hover { background-color: #2a4a35; }"
         )
         self.btn_add_row.clicked.connect(self._add_table_row)
-        waren_header_row.addWidget(self.btn_add_row)
+        items_btn_row.addWidget(self.btn_add_row)
 
         self.btn_delete_row = QPushButton("- Markierte loeschen")
         self.btn_delete_row.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -339,17 +362,41 @@ class OrderEntryApp(QWidget):
             "QPushButton:hover { background-color: #4a2a2a; }"
         )
         self.btn_delete_row.clicked.connect(self._delete_selected_rows)
-        waren_header_row.addWidget(self.btn_delete_row)
+        items_btn_row.addWidget(self.btn_delete_row)
+        items_btn_row.addStretch()
+        artikel_box.addLayout(items_btn_row)
 
-        right_layout.addLayout(waren_header_row)
+        artikel_scroll.setWidget(artikel_panel)
+        self._einkauf_artikel_tab = artikel_scroll
+        self.data_tabs.addTab(artikel_scroll, "Artikel")
 
-        # --- EinkaufItemsTableWidget fuer Einkauf-Modus (gleiche UI wie Modul 2) ---
-        self.einkauf_items_widget = EinkaufItemsTableWidget(self)
-        self.einkauf_items_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.einkauf_items_widget.table.setMinimumHeight(240)
-        self.einkauf_items_widget.eanLookupRequested.connect(lambda _ctx: self._lookup_ean_for_selected_row())
-        self.einkauf_items_widget.imageSearchRequested.connect(self._on_items_image_search_requested)
-        right_layout.addWidget(self.einkauf_items_widget)
+        # --- Tab 3: Uebersicht ---
+        uebersicht_scroll = QScrollArea()
+        uebersicht_scroll.setWidgetResizable(True)
+        uebersicht_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        uebersicht_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        uebersicht_panel = QWidget()
+        uebersicht_box = QVBoxLayout(uebersicht_panel)
+        uebersicht_box.setContentsMargins(0, 8, 12, 0)
+        uebersicht_box.setSpacing(12)
+
+        self.order_review_widget = OrderReviewPanelWidget(self)
+        self.order_review_widget.setMinimumHeight(96)
+        uebersicht_box.addWidget(self.order_review_widget)
+        uebersicht_box.addStretch(1)
+        uebersicht_scroll.setWidget(uebersicht_panel)
+        self.data_tabs.addTab(uebersicht_scroll, "Uebersicht")
+
+        right_layout.addWidget(self.data_tabs)
+
+        # --- Legacy QFormLayout-Container fuer Verkauf-Modus ---
+        self.form_layout_frame = QWidget()
+        _ff_layout = QVBoxLayout(self.form_layout_frame)
+        _ff_layout.setContentsMargins(0, 0, 0, 0)
+        self.form_layout = QFormLayout()
+        _ff_layout.addLayout(self.form_layout)
+        self.form_layout_frame.setVisible(False)
+        right_layout.addWidget(self.form_layout_frame)
 
         # --- Legacy QTableWidget fuer Verkauf-Modus ---
         self.table_waren = QTableWidget()
@@ -370,10 +417,6 @@ class OrderEntryApp(QWidget):
         self._ean_legacy_row_widget.setLayout(ean_row)
         self._ean_legacy_row_widget.setVisible(False)
         right_layout.addWidget(self._ean_legacy_row_widget)
-
-        # --- Summen-Banner (SummenBannerWidget – gleich wie Modul 2) ---
-        self.summen_banner = SummenBannerWidget(self)
-        right_layout.addWidget(self.summen_banner)
 
         # Legacy-Kompatibilitaet: summen_frame zeigt auf summen_banner
         self.summen_frame = self.summen_banner
@@ -403,12 +446,10 @@ class OrderEntryApp(QWidget):
     def _build_dynamic_form(self):
         self.inputs = {}
         if self.scan_mode == "einkauf":
-            # EinkaufHeadFormWidget anzeigen, Legacy-Layout ausblenden
-            self._einkauf_form_scroll.setVisible(True)
+            # Tab-basiertes Layout anzeigen, Legacy-Widgets ausblenden
+            self.data_tabs.setVisible(True)
+            self.data_tabs.setCurrentIndex(0)
             self.form_layout_frame.setVisible(False)
-
-            # EinkaufItemsTableWidget sichtbar, Legacy-Tabelle versteckt
-            self.einkauf_items_widget.setVisible(True)
             self.table_waren.setVisible(False)
             self._ean_legacy_row_widget.setVisible(False)
 
@@ -431,11 +472,8 @@ class OrderEntryApp(QWidget):
                     inner.textChanged.connect(lambda _: self._update_save_button_state())
         else:
             # Legacy-QFormLayout fuer Verkauf-Modus
-            self._einkauf_form_scroll.setVisible(False)
+            self.data_tabs.setVisible(False)
             self.form_layout_frame.setVisible(True)
-
-            # EinkaufItemsTableWidget versteckt, Legacy-Tabelle sichtbar
-            self.einkauf_items_widget.setVisible(False)
             self.table_waren.setVisible(True)
             self._ean_legacy_row_widget.setVisible(True)
 
