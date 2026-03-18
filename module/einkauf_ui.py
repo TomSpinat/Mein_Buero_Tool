@@ -2073,6 +2073,10 @@ class EinkaufItemsTableWidget(QWidget):
         }
         self.eanLookupRequested.emit(context)
 
+    def refresh_display(self, select_source_index=None):
+        """Oeffentliche Methode: Tabelle komplett neu zeichnen (z.B. nach externen Aenderungen)."""
+        self._rebuild_table(select_source_index=select_source_index)
+
     def clear_items(self):
         self._items = []
         self._review_rows = {}
