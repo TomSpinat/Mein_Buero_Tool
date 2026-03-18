@@ -2651,6 +2651,50 @@ class ScraperReviewWizardDialog(QDialog):
   def _current_mapping_state(self):
     return self._mapping_state_by_index.get(self.current_index)
 
+  # ── Mapping-State-Helfer (lokale Kapselung) ────────────────────
+
+  def _get_current_task_index(self):
+    """Gibt den aktuellen Task-Index der Mail zurueck (default: 0)."""
+    state = self._current_mapping_state()
+    if not isinstance(state, dict):
+      return 0
+    return int(state.get("task_index", 0) or 0)
+
+  def _set_current_task_index(self, task_index):
+    """Setzt den Task-Index der aktuellen Mail im State."""
+    state = self._current_mapping_state()
+    if isinstance(state, dict):
+      state["task_index"] = int(task_index)
+      self._mapping_state_by_index[self.current_index] = state
+
+  def _has_pending_mapping_tasks(self):
+    """Prueft, ob die aktuelle Mail noch offene Mapping-Tasks hat."""
+    state = self._current_mapping_state()
+    if not isinstance(state, dict):
+      return False
+    tasks = list(state.get("tasks", []) or [])
+    task_index = self._get_current_task_index()
+    return task_index < len(tasks)
+
+  def _advance_to_next_task(self):
+    """Erhoet task_index um 1 und synchronisiert _mapping_done_by_index."""
+    state = self._current_mapping_state()
+    if not isinstance(state, dict):
+      return
+    tasks = list(state.get("tasks", []) or [])
+    task_index = self._get_current_task_index()
+    self._set_current_task_index(task_index + 1)
+    # Synchronisiere _mapping_done_by_index
+    if task_index + 1 >= len(tasks):
+      self._mapping_done_by_index[self.current_index] = True
+    else:
+      self._mapping_done_by_index[self.current_index] = False
+
+  def _refresh_mapping_panel_and_ui(self):
+    """Rendert Panel + aktualisiert UI-Labels (kombinierte Refresh)."""
+    self._render_mapping_panel_for_current_mail()
+    self._update_mapping_state_ui()
+
   def _mapping_task_hint_text(self, task):
     raw_value = self._safe_text(task.get("raw_value", "")).strip() or "-"
     if task.get("task_type") == "amazon_country":
@@ -2665,12 +2709,12 @@ class ScraperReviewWizardDialog(QDialog):
       return
 
     tasks = list(state.get("tasks", []) or [])
-    task_index = int(state.get("task_index", 0) or 0)
-    if task_index >= len(tasks):
+    if not self._has_pending_mapping_tasks():
       self.mapping_frame.setVisible(False)
       self._clear_mapping_panel()
       return
 
+    task_index = self._get_current_task_index()
     task = tasks[task_index]
     self._clear_mapping_panel()
     self.mapping_frame.setVisible(True)
@@ -2692,7 +2736,7 @@ class ScraperReviewWizardDialog(QDialog):
       return
 
     tasks = list(state.get("tasks", []) or [])
-    task_index = int(state.get("task_index", 0) or 0)
+    task_index = self._get_current_task_index()
     if task_index >= len(tasks):
       return
 
@@ -2701,21 +2745,20 @@ class ScraperReviewWizardDialog(QDialog):
     self._mapping_state_by_index[self.current_index] = state
     self._apply_payload_to_current_mail(state.get("payload", {}))
 
-    state["task_index"] = task_index + 1
     self._mapping_prompted_by_index[self.current_index] = True
-    if state["task_index"] >= len(tasks):
-      self._mapping_done_by_index[self.current_index] = True
+    self._advance_to_next_task()
+
+    if self._has_pending_mapping_tasks():
+      self._refresh_mapping_panel_and_ui()
+    else:
       self.mapping_frame.setVisible(False)
       self._clear_mapping_panel()
-    else:
-      self._mapping_done_by_index[self.current_index] = False
-      self._render_mapping_panel_for_current_mail()
-    self._update_mapping_state_ui()
+      self._update_mapping_state_ui()
 
   def _update_mapping_state_ui(self):
     state = self._current_mapping_state() or {}
     tasks = list(state.get("tasks", []) or []) if isinstance(state, dict) else []
-    task_index = int(state.get("task_index", 0) or 0) if isinstance(state, dict) else 0
+    task_index = self._get_current_task_index()
     remaining = max(0, len(tasks) - task_index)
     done = bool(self._mapping_done_by_index.get(self.current_index, False))
 
@@ -3315,9 +3358,7 @@ class ScraperReviewWizardDialog(QDialog):
       state = self._ensure_mapping_state_for_index(self.current_index, rebuild=rebuild, source_payload=payload)
       self._apply_payload_to_current_mail(state.get("payload", {}))
 
-      tasks = list(state.get("tasks", []) or [])
-      task_index = int(state.get("task_index", 0) or 0)
-      if task_index >= len(tasks):
+      if not self._has_pending_mapping_tasks():
         self._mapping_done_by_index[self.current_index] = True
         self._clear_mapping_panel()
         if show_feedback:
@@ -3331,8 +3372,7 @@ class ScraperReviewWizardDialog(QDialog):
 
       self._mapping_done_by_index[self.current_index] = False
       self._mapping_prompted_by_index[self.current_index] = True
-      self._update_mapping_state_ui()
-      self._render_mapping_panel_for_current_mail()
+      self._refresh_mapping_panel_and_ui()
     except Exception as e:
       log_exception(__name__, e)
       QMessageBox.critical(self, "Mapping-Fehler", f"Mapping fehlgeschlagen:\n{e}")
