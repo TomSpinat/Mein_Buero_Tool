@@ -51,6 +51,7 @@ from module.shared_einkauf_review import (
   populate_einkauf_widgets,
   collect_einkauf_payload,
   apply_einkauf_post_save,
+  set_einkauf_review_data,
 )
 from module.normalization_dialog import NormalizationPanel
 from module.amazon_country_dialog import AmazonCountryPanel
@@ -3345,8 +3346,7 @@ class ScraperReviewWizardDialog(QDialog):
       )
       self._shared_db = bundle.get("db", self._shared_db)
       self._current_order_review_bundle = bundle
-      self.einkauf_form_widget.set_review_data(bundle)
-      self.einkauf_items_widget.set_review_data(bundle)
+      set_einkauf_review_data(self.einkauf_form_widget, self.einkauf_items_widget, bundle)
       self.order_review_widget.set_review_data(bundle)
       return bundle
     except Exception as e:

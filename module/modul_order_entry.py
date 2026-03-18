@@ -38,6 +38,7 @@ from module.shared_einkauf_review import (
     populate_einkauf_widgets,
     collect_einkauf_payload,
     apply_einkauf_post_save,
+    set_einkauf_review_data,
 )
 from module.shared_search_workflows import (
     create_logo_search_worker,
@@ -912,8 +913,7 @@ class OrderEntryApp(QWidget):
 
             # Split-View fuer geaenderte Felder einblenden;
             # unveraenderte Felder behalten ihren gerade gesetzten Wert (clear_review_change bewahrt ihn)
-            self.einkauf_form_widget.set_review_data(bundle)
-            self.einkauf_items_widget.set_review_data(bundle)
+            set_einkauf_review_data(self.einkauf_form_widget, self.einkauf_items_widget, bundle)
 
             # Speichern ermoeglichen auch ohne vorherigen KI-Scan
             self.btn_save_db.setEnabled(True)

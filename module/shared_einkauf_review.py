@@ -5,6 +5,7 @@ zwischen beiden Modulen vereinheitlichen:
 - Widget-Population (Payload → EinkaufHeadFormWidget + EinkaufItemsTableWidget)
 - Payload-Collection (Widgets → Payload)
 - Post-Save-Aktionen (Bildentscheidungen + Pending Matches)
+- Review-Bundle-Verteilung (bundle → EinkaufHeadFormWidget + EinkaufItemsTableWidget)
 """
 
 import logging
@@ -96,3 +97,20 @@ def apply_einkauf_post_save(parent_widget, settings_manager, items_widget, save_
     "image_result": image_result,
     "match_result": match_result,
   }
+
+
+# ── Review-Bundle-Verteilung ─────────────────────────────────────
+
+def set_einkauf_review_data(form_widget, items_widget, bundle):
+  """Verteilt ein Review-Bundle an EinkaufHeadFormWidget + EinkaufItemsTableWidget.
+
+  Beide Module rufen nach EinkaufPipeline.build_order_review_bundle() exakt
+  dieselbe Sequenz auf – diese Funktion vereinheitlicht diesen Pfad.
+
+  Args:
+    form_widget: EinkaufHeadFormWidget-Instanz.
+    items_widget: EinkaufItemsTableWidget-Instanz.
+    bundle: Review-Bundle von EinkaufPipeline.build_order_review_bundle().
+  """
+  form_widget.set_review_data(bundle)
+  items_widget.set_review_data(bundle)
