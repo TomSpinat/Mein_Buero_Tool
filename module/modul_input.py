@@ -10,7 +10,7 @@ Enthaelt KEINE Businesslogik – nur UX-Umschaltung.
 from PyQt6.QtWidgets import (
   QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QStackedWidget, QLabel, QFrame,
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QIcon
 
 from config import resource_path
@@ -49,7 +49,7 @@ class InputApp(QWidget):
     layout.addWidget(self._stack, 1)
 
   def _build_segment_bar(self):
-    """Erzeugt die Umschalt-Leiste mit zwei Segment-Buttons."""
+    """Erzeugt die Umschalt-Leiste mit Kontext-Label und zwei Segment-Buttons."""
     bar = QFrame()
     bar.setObjectName("InputSegmentBar")
     bar.setStyleSheet(
@@ -61,8 +61,26 @@ class InputApp(QWidget):
     )
 
     bar_layout = QHBoxLayout(bar)
-    bar_layout.setContentsMargins(18, 8, 18, 0)
-    bar_layout.setSpacing(4)
+    bar_layout.setContentsMargins(18, 6, 18, 0)
+    bar_layout.setSpacing(6)
+
+    # Kontext-Icon links neben den Segment-Buttons
+    context_icon = QLabel()
+    context_icon.setPixmap(
+      QIcon(resource_path("assets/icons/dash_order_entry.png")).pixmap(QSize(22, 22))
+    )
+    context_icon.setFixedSize(26, 26)
+    context_icon.setStyleSheet("background: transparent; border: none; padding-top: 2px;")
+    bar_layout.addWidget(context_icon)
+
+    # Kontext-Label
+    context_lbl = QLabel("Eingabekanal:")
+    context_lbl.setStyleSheet(
+      "color: #565f89; font-size: 12px; font-weight: bold;"
+      "background: transparent; border: none; padding-top: 2px;"
+    )
+    bar_layout.addWidget(context_lbl)
+    bar_layout.addSpacing(8)
 
     self._btn_scan = self._make_segment_button(
       "Beleg scannen",
@@ -85,7 +103,8 @@ class InputApp(QWidget):
     btn = QPushButton(f"  {text}")
     btn.setCursor(Qt.CursorShape.PointingHandCursor)
     btn.setIcon(QIcon(resource_path(icon_path)))
-    btn.setFixedHeight(38)
+    btn.setIconSize(QSize(18, 18))
+    btn.setFixedHeight(36)
     btn.clicked.connect(slot)
     return btn
 
@@ -101,37 +120,43 @@ class InputApp(QWidget):
     self._stack.setCurrentWidget(self.mail_app)
     self._update_segment_styles()
 
+  # ── Segment-Styles ─────────────────────────────────────────
+
+  _STYLE_ACTIVE = (
+    "QPushButton {"
+    "  background-color: #24283b;"
+    "  color: #7aa2f7;"
+    "  border: 1px solid #7aa2f7;"
+    "  border-bottom: 2px solid #7aa2f7;"
+    "  border-radius: 6px 6px 0px 0px;"
+    "  padding: 6px 18px;"
+    "  font-size: 13px;"
+    "  font-weight: bold;"
+    "}"
+  )
+
+  _STYLE_INACTIVE = (
+    "QPushButton {"
+    "  background-color: transparent;"
+    "  color: #565f89;"
+    "  border: 1px solid transparent;"
+    "  border-bottom: 1px solid #33354C;"
+    "  border-radius: 6px 6px 0px 0px;"
+    "  padding: 6px 18px;"
+    "  font-size: 13px;"
+    "}"
+    "QPushButton:hover {"
+    "  color: #a9b1d6;"
+    "  background-color: #1f2335;"
+    "}"
+  )
+
   def _update_segment_styles(self):
     """Aktualisiert die Segment-Button-Styles basierend auf dem aktiven Tab."""
     active_widget = self._stack.currentWidget()
 
     for btn, widget in [(self._btn_scan, self.scanner_app), (self._btn_mail, self.mail_app)]:
       if widget is active_widget:
-        btn.setStyleSheet(
-          "QPushButton {"
-          "  background-color: #24283b;"
-          "  color: #7aa2f7;"
-          "  border: 1px solid #7aa2f7;"
-          "  border-bottom: 2px solid #7aa2f7;"
-          "  border-radius: 6px 6px 0px 0px;"
-          "  padding: 6px 18px;"
-          "  font-size: 13px;"
-          "  font-weight: bold;"
-          "}"
-        )
+        btn.setStyleSheet(self._STYLE_ACTIVE)
       else:
-        btn.setStyleSheet(
-          "QPushButton {"
-          "  background-color: transparent;"
-          "  color: #565f89;"
-          "  border: 1px solid transparent;"
-          "  border-bottom: 1px solid #33354C;"
-          "  border-radius: 6px 6px 0px 0px;"
-          "  padding: 6px 18px;"
-          "  font-size: 13px;"
-          "}"
-          "QPushButton:hover {"
-          "  color: #a9b1d6;"
-          "  background-color: #1f2335;"
-          "}"
-        )
+        btn.setStyleSheet(self._STYLE_INACTIVE)

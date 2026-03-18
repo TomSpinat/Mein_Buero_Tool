@@ -73,7 +73,7 @@ class DashboardWindow(QMainWindow):
         # resizeEvent triggern koennen → Rekursion / Flackern verhindern.
         if self._in_resize:
             return
-        if not hasattr(self, 'btn_scanner'):
+        if not hasattr(self, 'btn_input'):
             return
 
         self._in_resize = True
@@ -83,7 +83,7 @@ class DashboardWindow(QMainWindow):
             btn_size = max(100, min(200, int(w / 6.5)))
             icon_size = int(btn_size * 0.55)
             for btn in [
-                self.btn_scanner, self.btn_mail, self.btn_tracker,
+                self.btn_input, self.btn_tracker,
                 self.btn_inbound, self.btn_packstation, self.btn_finances,
                 self.btn_poms,
             ]:
