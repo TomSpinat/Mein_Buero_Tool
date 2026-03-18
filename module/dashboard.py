@@ -93,6 +93,20 @@ class DashboardWindow(QMainWindow):
             self._in_resize = False
 
     # ------------------------------------------------------------------
+    # Abwaertskompatibilitaet – Submodul-Zugriff ueber InputApp
+    # ------------------------------------------------------------------
+
+    @property
+    def scanner_app(self):
+        """Liefert den Scanner-Fachkern aus der InputApp (Abwaertskompatibilitaet)."""
+        return self.input_app.scanner_app
+
+    @property
+    def mail_app(self):
+        """Liefert den Mail-Fachkern aus der InputApp (Abwaertskompatibilitaet)."""
+        return self.input_app.mail_app
+
+    # ------------------------------------------------------------------
     # Aufbau
     # ------------------------------------------------------------------
 
@@ -210,8 +224,6 @@ class DashboardWindow(QMainWindow):
 
         # --- Module ---
         self.input_app       = InputApp(self.settings_manager)
-        self.scanner_app     = self.input_app.scanner_app   # Abwaertskompatibilitaet
-        self.mail_app        = self.input_app.mail_app       # Abwaertskompatibilitaet
         self.tracker_app     = TrackerApp(self.settings_manager)
         self.inbound_app     = WareneingangApp(self.settings_manager)
         self.packstation_app = PackstationApp(self.settings_manager)
@@ -254,23 +266,24 @@ class DashboardWindow(QMainWindow):
         elif action_str == "open_packstation":
             self.open_packstation()
 
-    def open_input(self, tab="scan"):
-        """Oeffnet das Input-Modul, optional mit bestimmtem Tab."""
-        if tab == "mail":
-            self.input_app.show_mail_tab()
-        else:
-            self.input_app.show_scan_tab()
+    def open_input(self, tab=InputApp.TAB_SCAN):
+        """Oeffnet das Input-Modul auf dem angegebenen Tab.
+
+        Args:
+            tab: InputApp.TAB_SCAN (Standard) oder InputApp.TAB_MAIL.
+        """
+        self.input_app.activate(tab)
         self.stacked_widget.setCurrentWidget(self.input_app)
         self.title_lbl.setText("INPUT")
         self.btn_back.show()
 
     def open_scanner(self):
         """Abwaertskompatibilitaet: Oeffnet Input-Modul auf Beleg-Scan-Tab."""
-        self.open_input(tab="scan")
+        self.open_input(tab=InputApp.TAB_SCAN)
 
     def open_mail_scraper(self):
         """Abwaertskompatibilitaet: Oeffnet Input-Modul auf E-Mail-Tab."""
-        self.open_input(tab="mail")
+        self.open_input(tab=InputApp.TAB_MAIL)
 
     def open_tracker(self):
         self.stacked_widget.setCurrentWidget(self.tracker_app)
