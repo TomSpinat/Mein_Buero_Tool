@@ -1,12 +1,14 @@
 """
 shared_search_workflows.py
-Gemeinsame Such-Workflows (Logo, spaeter EAN), die von Modul 1 und Modul 2 genutzt werden.
+Gemeinsame Such-Workflows (Logo, EAN), die von Modul 1 und Modul 2 genutzt werden.
 Extrahiert aus modul_order_entry.py und modul_mail_scraper.py, um Duplikate zu vermeiden.
 """
 
 import os
 
 from module.shop_logo_search_worker import ShopLogoSearchWorker
+from module.ean_search_worker import EanLookupWorker
+from module.ean_lookup_dialog import EanLookupDialog
 from module.media.media_grid_selection_dialog import MediaGridSelectionDialog
 from module.media.media_service import MediaService
 from module.media.media_store import LocalMediaStore
@@ -169,4 +171,168 @@ def handle_logo_search_error(*, parent_widget, err_msg):
     CustomMsgBox.warning(
         parent_widget, "Logo-Suche",
         f"Die Logo-Suche ist fehlgeschlagen:\n{text}",
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# EAN-Lookup-Workflow  (gemeinsam genutzt von Modul 1 Einkauf + Modul 2 Wizard)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def create_ean_lookup_worker(
+    *,
+    parent_widget,
+    settings_manager,
+    context,
+    current_worker,
+    ean_button,
+    on_finished_callback,
+    on_error_callback,
+):
+    """
+    Erstellt und startet einen EanLookupWorker fuer den gemeinsamen EAN-Workflow.
+
+    Prueft zuerst, ob *current_worker* noch laeuft, und ob *context* einen
+    gueltigen Produktnamen enthaelt.
+    Setzt *ean_button* auf Busy-State.
+
+    Parameter:
+        parent_widget:        QWidget-Eltern fuer Dialoge
+        settings_manager:     SettingsManager-Instanz
+        context:              dict mit mindestens "produkt_name" (+ optional "varianten_info")
+        current_worker:       Referenz auf den aktuell laufenden Worker (oder None)
+        ean_button:           QPushButton der in Busy-State versetzt wird
+        on_finished_callback: Slot fuer result_signal
+        on_error_callback:    Slot fuer error_signal
+
+    Gibt den gestarteten Worker zurueck, oder None wenn die Suche abgelehnt wurde.
+    Der Aufrufer ist dafuer verantwortlich, den Worker in seinem eigenen Attribut zu speichern.
+    """
+    if current_worker is not None and current_worker.isRunning():
+        CustomMsgBox.information(
+            parent_widget, "EAN Suche",
+            "Es laeuft bereits eine EAN-Suche im Hintergrund.",
+        )
+        return None
+
+    produkt_name = str((context or {}).get("produkt_name", "") or "").strip()
+    if not produkt_name:
+        CustomMsgBox.warning(
+            parent_widget, "EAN Suche",
+            "In der markierten Zeile fehlt der Produktname.",
+        )
+        return None
+
+    if ean_button is not None:
+        ean_button.setEnabled(False)
+        ean_button.setText("EAN Suche laeuft...")
+
+    varianten_info = str((context or {}).get("varianten_info", "") or "").strip()
+
+    worker = EanLookupWorker(
+        settings_manager,
+        produkt_name,
+        varianten_info=varianten_info,
+        limit=25,
+        allow_api_fallback=True,
+    )
+    worker.result_signal.connect(on_finished_callback)
+    worker.error_signal.connect(on_error_callback)
+    worker.start()
+    return worker
+
+
+def reset_ean_lookup_button(ean_button):
+    """
+    Setzt den EAN-Such-Button in den Grundzustand zurueck.
+    """
+    if ean_button is not None:
+        ean_button.setEnabled(True)
+        ean_button.setText("EAN suchen (markierte Zeile)")
+
+
+def handle_ean_lookup_result(
+    *,
+    parent_widget,
+    payload,
+    context,
+    ean_service,
+    on_ean_selected=None,
+):
+    """
+    Verarbeitet das Ergebnis einer EAN-Suche:
+    Kandidaten-Parsing -> Auswahl-Dialog -> Validierung -> Callback + remember_candidate.
+
+    Gibt ein dict mit dem Ergebnisstatus zurueck:
+        {"status": "no_candidates"}           – keine Treffer gefunden
+        {"status": "no_candidates_api_error"} – keine Treffer + API-Fehler
+        {"status": "cancelled"}               – Benutzer hat Dialog abgebrochen
+        {"status": "invalid_ean"}             – gewaehlter Eintrag hat keine gueltige EAN
+        {"status": "selected", "ean": str, "row": int, "selected_candidate": dict}
+
+    Parameter:
+        parent_widget:   QWidget-Eltern fuer Dialoge
+        payload:         Ergebnis vom EanLookupWorker (dict mit "candidates", optional "error")
+        context:         dict mit "row", "produkt_name", "varianten_info" (wie beim Start uebergeben)
+        ean_service:     EanService-Instanz fuer remember_candidate_selection
+        on_ean_selected: Optionaler Callback(row: int, ean: str) – wird nach erfolgreicher Auswahl
+                         aufgerufen, damit der Caller die EAN in sein Widget/Tabelle schreibt.
+    """
+    candidates = payload.get("candidates", []) if isinstance(payload, dict) else []
+    error_payload = payload.get("error", {}) if isinstance(payload, dict) else {}
+
+    if not candidates:
+        api_msg = ""
+        if isinstance(error_payload, dict):
+            api_msg = str(error_payload.get("user_message", "")).strip()
+        if api_msg:
+            CustomMsgBox.warning(
+                parent_widget, "EAN Suche",
+                "Lokal gab es keine Treffer und die API-Suche ist fehlgeschlagen:\n\n" + api_msg,
+            )
+            return {"status": "no_candidates_api_error"}
+        else:
+            CustomMsgBox.information(
+                parent_widget, "Keine Treffer",
+                "Es wurden weder lokal noch ueber die API passende EAN-Vorschlaege gefunden.",
+            )
+            return {"status": "no_candidates"}
+
+    produkt_name = str((context or {}).get("produkt_name", "") or "").strip()
+    selected = EanLookupDialog.choose(produkt_name, candidates, parent=parent_widget)
+    if not selected:
+        return {"status": "cancelled"}
+
+    chosen_ean = str(selected.get("ean", "") or "").strip()
+    if not chosen_ean:
+        CustomMsgBox.warning(
+            parent_widget, "EAN Suche",
+            "Der gewaehlte Eintrag hat keine gueltige EAN.",
+        )
+        return {"status": "invalid_ean"}
+
+    row = int((context or {}).get("row", -1) or -1)
+
+    # EAN in das Ziel-Widget schreiben (Caller-Verantwortung)
+    if on_ean_selected is not None:
+        on_ean_selected(row, chosen_ean)
+
+    # Auswahl merken fuer zukuenftige Vorschlaege
+    if ean_service is not None:
+        ean_service.remember_candidate_selection(
+            produkt_name,
+            selected,
+            varianten_info=str((context or {}).get("varianten_info", "") or "").strip(),
+        )
+
+    return {"status": "selected", "ean": chosen_ean, "row": row, "selected_candidate": selected}
+
+
+def handle_ean_lookup_error(*, parent_widget, err_msg):
+    """
+    Zeigt eine Fehlermeldung fuer eine fehlgeschlagene EAN-Suche.
+    """
+    text = str(err_msg or "").strip() or "Unbekannter Fehler bei der EAN-Suche."
+    CustomMsgBox.warning(
+        parent_widget, "EAN Suche",
+        f"Die EAN-Suche ist fehlgeschlagen:\n{text}",
     )

@@ -50,8 +50,6 @@ from module.einkauf_ui import EinkaufHeadFormWidget, EinkaufItemsTableWidget, Or
 from module.normalization_dialog import NormalizationPanel
 from module.amazon_country_dialog import AmazonCountryPanel
 from module.ean_service import EanService
-from module.ean_lookup_dialog import EanLookupDialog
-from module.ean_search_worker import EanLookupWorker
 from module.mail_screenshot_renderer import MailScreenshotRenderJob
 from module.mail_pipeline_ui import MailPipelineDashboardWidget
 from module.scan_input_preprocessing import prepare_mail_scan
@@ -63,6 +61,7 @@ from module.crash_logger import (
   log_classified_error,
   log_exception,
 )
+from module.custom_msgbox import CustomMsgBox
 from module.lookup_service import LookupService
 from module.lookup_results import FieldState, FieldType, LookupSource
 from module.secret_store import sanitize_text
@@ -77,6 +76,10 @@ from module.shared_search_workflows import (
     reset_logo_search_button,
     handle_logo_search_result,
     handle_logo_search_error,
+    create_ean_lookup_worker,
+    reset_ean_lookup_button,
+    handle_ean_lookup_result,
+    handle_ean_lookup_error,
 )
 
 
@@ -3258,44 +3261,27 @@ class ScraperReviewWizardDialog(QDialog):
     base["waren"] = self.einkauf_items_widget.get_items()
     return base
   def _lookup_ean_for_selected_row(self):
-    if self.ean_lookup_worker is not None and self.ean_lookup_worker.isRunning():
-      QMessageBox.information(self, "EAN Suche", "Es laeuft bereits eine EAN-Suche im Hintergrund.")
-      return
-
+    """EAN-Suche fuer die selektierte Artikelzeile (delegiert an shared workflow)."""
     context = self.einkauf_items_widget.get_selected_context()
     if not isinstance(context, dict):
-      QMessageBox.information(self, "EAN Suche", "Bitte zuerst eine Artikelzeile markieren.")
+      CustomMsgBox.information(self, "EAN Suche", "Bitte zuerst eine Artikelzeile markieren.")
       return
 
-    row = int(context.get("row", -1) or -1)
-    produkt_name = self._safe_text(context.get("produkt_name", "")).strip()
-    varianten_info = self._safe_text(context.get("varianten_info", "")).strip()
-    if not produkt_name:
-      QMessageBox.warning(self, "EAN Suche", "In der markierten Zeile fehlt der Produktname.")
-      return
-
-    self._pending_ean_lookup_context = {
-      "row": row,
-      "produkt_name": produkt_name,
-      "varianten_info": varianten_info,
-    }
-    self.einkauf_items_widget.btn_ean_lookup.setEnabled(False)
-    self.einkauf_items_widget.btn_ean_lookup.setText("EAN Suche laeuft...")
-
-    self.ean_lookup_worker = EanLookupWorker(
-      self.settings_manager,
-      produkt_name,
-      varianten_info=varianten_info,
-      limit=25,
-      allow_api_fallback=True,
+    worker = create_ean_lookup_worker(
+      parent_widget=self,
+      settings_manager=self.settings_manager,
+      context=context,
+      current_worker=self.ean_lookup_worker,
+      ean_button=self.einkauf_items_widget.btn_ean_lookup,
+      on_finished_callback=self._on_ean_lookup_finished,
+      on_error_callback=self._on_ean_lookup_error,
     )
-    self.ean_lookup_worker.result_signal.connect(self._on_ean_lookup_finished)
-    self.ean_lookup_worker.error_signal.connect(self._on_ean_lookup_error)
-    self.ean_lookup_worker.start()
+    if worker is not None:
+      self._pending_ean_lookup_context = dict(context)
+      self.ean_lookup_worker = worker
 
   def _finish_ean_lookup_ui(self):
-    self.einkauf_items_widget.btn_ean_lookup.setEnabled(True)
-    self.einkauf_items_widget.btn_ean_lookup.setText("EAN suchen (markierte Zeile)")
+    reset_ean_lookup_button(self.einkauf_items_widget.btn_ean_lookup)
     self.ean_lookup_worker = None
 
   def _on_ean_lookup_finished(self, payload):
@@ -3303,53 +3289,21 @@ class ScraperReviewWizardDialog(QDialog):
     self._pending_ean_lookup_context = None
     self._finish_ean_lookup_ui()
 
-    candidates = payload.get("candidates", []) if isinstance(payload, dict) else []
-    error_payload = payload.get("error", {}) if isinstance(payload, dict) else {}
-    if not candidates:
-      api_msg = ""
-      if isinstance(error_payload, dict):
-        api_msg = str(error_payload.get("user_message", "")).strip()
-      if api_msg:
-        QMessageBox.warning(
-          self,
-          "EAN Suche",
-          "Lokal gab es keine Treffer und die API-Suche ist fehlgeschlagen:\n\n" + api_msg,
-        )
-      else:
-        QMessageBox.information(
-          self,
-          "Keine Treffer",
-          "Es wurden weder lokal noch ueber die API passende EAN-Vorschlaege gefunden."
-        )
-      return
+    def _write_ean(row, ean):
+      self.einkauf_items_widget.set_ean_for_row(row, ean)
 
-    produkt_name = str(context.get("produkt_name", "")).strip()
-    selected = EanLookupDialog.choose(produkt_name, candidates, parent=self)
-    if not selected:
-      return
-
-    chosen_ean = str(selected.get("ean", "")).strip()
-    if not chosen_ean:
-      QMessageBox.warning(self, "EAN Suche", "Der gewaehlte Eintrag hat keine gueltige EAN.")
-      return
-
-    row = int(context.get("row", -1) or -1)
-    if row < 0 or row >= self.table_waren.rowCount():
-      QMessageBox.warning(self, "EAN Suche", "Die bearbeitete Tabellenzeile existiert nicht mehr.")
-      return
-
-    self.einkauf_items_widget.set_ean_for_row(row, chosen_ean)
-    self.ean_service.remember_candidate_selection(
-      produkt_name,
-      selected,
-      varianten_info=str(context.get("varianten_info", "")).strip(),
+    handle_ean_lookup_result(
+      parent_widget=self,
+      payload=payload,
+      context=context,
+      ean_service=self.ean_service,
+      on_ean_selected=_write_ean,
     )
 
   def _on_ean_lookup_error(self, err_msg):
     self._pending_ean_lookup_context = None
     self._finish_ean_lookup_ui()
-    msg = str(err_msg or "").strip() or "Unbekannter Fehler bei der EAN-Suche."
-    QMessageBox.warning(self, "EAN Suche", f"Die EAN-Suche ist fehlgeschlagen:\n{msg}")
+    handle_ean_lookup_error(parent_widget=self, err_msg=err_msg)
 
   def _on_run_mapping_clicked(self):
     self._set_mapping_panel_collapsed(False)

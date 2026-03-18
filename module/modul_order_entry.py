@@ -42,6 +42,10 @@ from module.shared_search_workflows import (
     reset_logo_search_button,
     handle_logo_search_result,
     handle_logo_search_error,
+    create_ean_lookup_worker,
+    reset_ean_lookup_button,
+    handle_ean_lookup_result,
+    handle_ean_lookup_error,
 )
 
 from module.crash_logger import (
@@ -964,12 +968,9 @@ class OrderEntryApp(QWidget):
         self.ean_lookup_worker.start()
 
     def _finish_ean_lookup_ui(self):
-        self.btn_ean_lookup.setEnabled(True)
-        self.btn_ean_lookup.setText("EAN suchen (markierte Zeile)")
-        # EinkaufItemsTableWidget hat eigenen EAN-Button – auch zuruecksetzen
+        reset_ean_lookup_button(self.btn_ean_lookup)
         if hasattr(self, "einkauf_items_widget"):
-            self.einkauf_items_widget.btn_ean_lookup.setEnabled(True)
-            self.einkauf_items_widget.btn_ean_lookup.setText("EAN suchen (markierte Zeile)")
+            reset_ean_lookup_button(self.einkauf_items_widget.btn_ean_lookup)
         self.ean_lookup_worker = None
 
     def _on_ean_lookup_finished(self, payload):
@@ -977,6 +978,24 @@ class OrderEntryApp(QWidget):
         self._pending_ean_lookup_context = None
         self._finish_ean_lookup_ui()
 
+        if context.get("_via_einkauf_widget"):
+            # Einkauf-Pfad: komplett ueber shared workflow
+            def _write_ean(row, ean):
+                self.einkauf_items_widget.set_ean_for_row(row, ean)
+
+            handle_ean_lookup_result(
+                parent_widget=self,
+                payload=payload,
+                context=context,
+                ean_service=self.ean_service,
+                on_ean_selected=_write_ean,
+            )
+        else:
+            # Verkauf-Pfad: Legacy-Tabelle (bleibt modul-spezifisch)
+            self._handle_verkauf_ean_result(payload, context)
+
+    def _handle_verkauf_ean_result(self, payload, context):
+        """Verkauf-spezifischer EAN-Ergebnis-Handler (Legacy-QTableWidget)."""
         candidates = payload.get("candidates", []) if isinstance(payload, dict) else []
         error_payload = payload.get("error", {}) if isinstance(payload, dict) else {}
         if not candidates:
@@ -985,15 +1004,13 @@ class OrderEntryApp(QWidget):
                 api_msg = str(error_payload.get("user_message", "")).strip()
             if api_msg:
                 CustomMsgBox.warning(
-                    self,
-                    "EAN Suche",
+                    self, "EAN Suche",
                     "Lokal gab es keine Treffer und die API-Suche ist fehlgeschlagen:\n\n" + api_msg,
                 )
             else:
                 CustomMsgBox.information(
-                    self,
-                    "Keine Treffer",
-                    "Es wurden weder lokal noch ueber die API passende EAN-Vorschlaege gefunden."
+                    self, "Keine Treffer",
+                    "Es wurden weder lokal noch ueber die API passende EAN-Vorschlaege gefunden.",
                 )
             return
 
@@ -1009,16 +1026,10 @@ class OrderEntryApp(QWidget):
 
         row = int(context.get("row", -1) or -1)
         ean_col = int(context.get("ean_col", 2) or 2)
-
-        if context.get("_via_einkauf_widget"):
-            # Einkauf-Modus: EAN ueber EinkaufItemsTableWidget setzen
-            self.einkauf_items_widget.set_ean_for_row(row, chosen_ean)
-        else:
-            # Verkauf-Modus: EAN direkt in Legacy-Tabelle setzen
-            if row < 0 or row >= self.table_waren.rowCount():
-                CustomMsgBox.warning(self, "EAN Suche", "Die bearbeitete Tabellenzeile existiert nicht mehr.")
-                return
-            self.table_waren.setItem(row, ean_col, QTableWidgetItem(chosen_ean))
+        if row < 0 or row >= self.table_waren.rowCount():
+            CustomMsgBox.warning(self, "EAN Suche", "Die bearbeitete Tabellenzeile existiert nicht mehr.")
+            return
+        self.table_waren.setItem(row, ean_col, QTableWidgetItem(chosen_ean))
 
         self.ean_service.remember_candidate_selection(
             produkt_name,
@@ -1029,37 +1040,26 @@ class OrderEntryApp(QWidget):
     def _on_ean_lookup_error(self, err_msg):
         self._pending_ean_lookup_context = None
         self._finish_ean_lookup_ui()
-        msg = str(err_msg or "").strip() or "Unbekannter Fehler bei der EAN-Suche."
-        CustomMsgBox.warning(self, "EAN Suche", f"Die EAN-Suche ist fehlgeschlagen:\n{msg}")
+        handle_ean_lookup_error(parent_widget=self, err_msg=err_msg)
 
     # ── EinkaufItemsTableWidget Signal-Handler ───────────────────────
 
     def _on_einkauf_items_ean_lookup(self, context):
-        """Signal-Handler: EAN-Suche aus EinkaufItemsTableWidget heraus."""
-        if self.ean_lookup_worker is not None and self.ean_lookup_worker.isRunning():
-            CustomMsgBox.information(self, "EAN Suche", "Es laeuft bereits eine EAN-Suche im Hintergrund.")
-            return
-
-        produkt_name = str(context.get("produkt_name", "")).strip()
-        if not produkt_name:
-            CustomMsgBox.warning(self, "EAN Suche", "In der markierten Zeile fehlt der Produktname.")
-            return
-
-        self._pending_ean_lookup_context = dict(context)
-        self._pending_ean_lookup_context["_via_einkauf_widget"] = True
-        self.einkauf_items_widget.btn_ean_lookup.setEnabled(False)
-        self.einkauf_items_widget.btn_ean_lookup.setText("EAN Suche laeuft...")
-
-        self.ean_lookup_worker = EanLookupWorker(
-            self.settings_manager,
-            produkt_name,
-            varianten_info=str(context.get("varianten_info", "")).strip(),
-            limit=25,
-            allow_api_fallback=True,
+        """Signal-Handler: EAN-Suche aus EinkaufItemsTableWidget heraus (delegiert an shared workflow)."""
+        ctx = dict(context or {})
+        ctx["_via_einkauf_widget"] = True
+        worker = create_ean_lookup_worker(
+            parent_widget=self,
+            settings_manager=self.settings_manager,
+            context=ctx,
+            current_worker=self.ean_lookup_worker,
+            ean_button=self.einkauf_items_widget.btn_ean_lookup,
+            on_finished_callback=self._on_ean_lookup_finished,
+            on_error_callback=self._on_ean_lookup_error,
         )
-        self.ean_lookup_worker.result_signal.connect(self._on_ean_lookup_finished)
-        self.ean_lookup_worker.error_signal.connect(self._on_ean_lookup_error)
-        self.ean_lookup_worker.start()
+        if worker is not None:
+            self._pending_ean_lookup_context = ctx
+            self.ean_lookup_worker = worker
 
     def _on_einkauf_items_image_search(self, context):
         """Signal-Handler: Produktbild-Suche aus EinkaufItemsTableWidget heraus."""
