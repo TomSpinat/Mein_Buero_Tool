@@ -9,6 +9,9 @@ zwischen beiden Modulen vereinheitlichen:
 - Warenwert-Berechnung und Delta-Pruefung
 - Summen-Banner-Refresh
 - Validierung, Warnungen und Pflichtfeld-Markierung
+- Save-Readiness-Pruefung und Checkliste
+- Order-Number-Callback-Factory
+- Widget-Reset
 """
 
 import logging
@@ -298,3 +301,130 @@ def mark_pflichtfeld(form_widget, field_key, is_valid, tooltip=None):
   else:
     inner.setStyleSheet("")
     inner.setToolTip("")
+
+
+# ── Save-Readiness ───────────────────────────────────────────────────────────
+
+def check_einkauf_save_ready(form_widget, items_widget, mark_fields=False, tooltip=None):
+  """Prueft ob die Mindestanforderungen fuer einen Einkauf-Save erfuellt sind.
+
+  Benoetigt mindestens:
+  - Bestellnummer ausgefuellt
+  - Mindestens eine Artikelposition mit Produktname
+
+  Args:
+    form_widget: EinkaufHeadFormWidget-Instanz.
+    items_widget: EinkaufItemsTableWidget-Instanz.
+    mark_fields: Wenn True, wird die Bestellnummer visuell markiert
+        (rot bei leer, neutral bei gefuellt).
+    tooltip: Optionaler Tooltip fuer leeres Bestellnummer-Feld.
+
+  Returns:
+    bool: True wenn speicherbereit.
+  """
+  bestellnummer = _field_text(form_widget, "bestellnummer")
+  if mark_fields:
+    mark_pflichtfeld(form_widget, "bestellnummer", bool(bestellnummer), tooltip)
+  items = items_widget.get_items()
+  has_named_item = any(str(it.get("produkt_name", "")).strip() for it in items)
+  return bool(bestellnummer) and has_named_item
+
+
+# ── Validierungs-Checkliste ──────────────────────────────────────────────────
+
+# Standard-Einkauf-Checklisten-Felder: (field_key, Label).
+_EINKAUF_CHECKLIST_FIELDS = [
+    ("bestellnummer", "Bestellnummer"),
+    ("shop_name", "Shop-Name"),
+    ("bestell_datum", "Bestelldatum"),
+]
+
+
+def build_einkauf_checklist(form_widget, items):
+  """Erstellt die Standard-Einkauf-Validierungs-Checkliste.
+
+  Prueft Pflichtfelder, Gesamtpreis > 0 und mindestens 1 Artikel.
+  Modulspezifische Eintraege (z.B. 'Mapping erledigt') koennen
+  vom Aufrufer an die zurueckgegebene Liste angehaengt werden.
+
+  Args:
+    form_widget: EinkaufHeadFormWidget-Instanz.
+    items: Liste von Artikel-Dicts (z.B. von items_widget.get_items()).
+
+  Returns:
+    list[tuple[str, bool]]: Liste von (Label, ist_ok) Eintraegen.
+  """
+  checks = []
+  for key, label in _EINKAUF_CHECKLIST_FIELDS:
+    checks.append((label, bool(_field_text(form_widget, key))))
+
+  # Gesamtpreis > 0 (float-Parse)
+  gesamt_ok = False
+  try:
+    gesamt_text = _field_text(form_widget, "gesamt_ekp_brutto")
+    if gesamt_text:
+      gesamt_ok = float(gesamt_text.replace(",", ".")) > 0
+  except (ValueError, TypeError):
+    pass
+  checks.append(("Gesamtpreis", gesamt_ok))
+  checks.append(("Min. 1 Artikel", len(items or []) > 0))
+  return checks
+
+
+def format_checklist_text(checks):
+  """Formatiert eine Checkliste als mehrzeiligen Text mit Haekchen/Kreuzen.
+
+  Args:
+    checks: Liste von (Label, ist_ok) Tupeln.
+
+  Returns:
+    str: Mehrzeiliger Text mit ✓/✗ pro Eintrag.
+  """
+  return "\n".join(
+    f"{'\u2713' if ok else '\u2717'} {label}" for label, ok in checks
+  )
+
+
+# ── Order-Number-Callback ───────────────────────────────────────────────────
+
+def make_order_number_callback(inputs_dict, payload_dict, text_fn=None):
+  """Erzeugt einen Callback fuer Bestellnummer-Aenderungen durch die Pipeline.
+
+  Beide Module erzeugen in ihrem Save-Flow einen identischen Callback,
+  der bei Pipeline-generierter Bestellnummer sowohl das Widget als auch
+  das Payload-Dict aktualisiert. Diese Factory vereinheitlicht das Pattern.
+
+  Args:
+    inputs_dict: Dict mit Widget-Referenzen (z.B. form_widget.inputs).
+    payload_dict: Dict dessen 'bestellnummer'-Schluessel aktualisiert wird.
+    text_fn: Optionale Text-Normalisierungsfunktion (z.B. _safe_text).
+
+  Returns:
+    callable: Callback-Funktion fuer on_order_number_changed.
+  """
+  def _on_order_number_changed(new_no):
+    text = text_fn(new_no) if text_fn else new_no
+    payload_dict["bestellnummer"] = text
+    widget = inputs_dict.get("bestellnummer")
+    if widget:
+      widget.setText(text)
+  return _on_order_number_changed
+
+
+# ── Widget-Reset ─────────────────────────────────────────────────────────────
+
+def reset_einkauf_widgets(form_widget, items_widget):
+  """Setzt beide Einkauf-Widgets auf ihren Ausgangszustand zurueck.
+
+  Leert Kopfdaten-Formular, Inline-Suggestions und Artikeltabelle.
+  Geeignet nach erfolgreichem Speichern oder beim Moduswechsel.
+
+  Args:
+    form_widget: EinkaufHeadFormWidget-Instanz.
+    items_widget: EinkaufItemsTableWidget-Instanz.
+  """
+  form_widget.clear_values()
+  for widget in form_widget.inputs.values():
+    if hasattr(widget, "clear_suggestions"):
+      widget.clear_suggestions()
+  items_widget.clear_items()

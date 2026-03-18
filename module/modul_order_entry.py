@@ -40,7 +40,9 @@ from module.shared_einkauf_review import (
     apply_einkauf_post_save,
     set_einkauf_review_data,
     refresh_summen_banner,
-    mark_pflichtfeld,
+    check_einkauf_save_ready,
+    make_order_number_callback,
+    reset_einkauf_widgets,
 )
 from module.shared_search_workflows import (
     create_logo_search_worker,
@@ -1239,15 +1241,11 @@ class OrderEntryApp(QWidget):
 
     def _check_einkauf_save_ready(self):
         """Einkauf-Pfad: Bestellnummer + mindestens 1 Position mit Produktname."""
-        bestellnummer_widget = self.inputs.get("bestellnummer")
-        bestellnummer = str(bestellnummer_widget.text()).strip() if bestellnummer_widget else ""
-        mark_pflichtfeld(
-            self.einkauf_form_widget, "bestellnummer", bool(bestellnummer),
-            "Pflichtfeld: Bestellnummer muss ausgefuellt sein",
+        return check_einkauf_save_ready(
+            self.einkauf_form_widget, self.einkauf_items_widget,
+            mark_fields=True,
+            tooltip="Pflichtfeld: Bestellnummer muss ausgefuellt sein",
         )
-        items = self.einkauf_items_widget.get_items()
-        has_item = any(str(it.get("produkt_name", "")).strip() for it in items)
-        return bool(bestellnummer) and has_item
 
     def _check_verkauf_save_ready(self):
         """Verkauf-Pfad (Legacy): Ticket-Name + mindestens 1 Zeile in der Tabelle."""
@@ -1322,11 +1320,7 @@ class OrderEntryApp(QWidget):
 
     def _reset_einkauf_state(self):
         """Einkauf-Pfad: Kopfdaten-Widget + Artikel-Widget leeren."""
-        self.einkauf_form_widget.clear_values()
-        for widget in self.inputs.values():
-            if hasattr(widget, "clear_suggestions"):
-                widget.clear_suggestions()
-        self.einkauf_items_widget.clear_items()
+        reset_einkauf_widgets(self.einkauf_form_widget, self.einkauf_items_widget)
 
     def _reset_verkauf_state(self):
         """Verkauf-Pfad (Legacy): QLineEdits + QTableWidget leeren."""
@@ -1361,11 +1355,6 @@ class OrderEntryApp(QWidget):
             CustomMsgBox.warning(self, "Validierung", "Mindestens eine Position muss einen Produktnamen haben.")
             return
 
-        def _on_order_number_changed(new_no):
-            self.current_gemini_data["bestellnummer"] = new_no
-            if "bestellnummer" in self.inputs:
-                self.inputs["bestellnummer"].setText(new_no)
-
         try:
             has_scan = bool(self.current_gemini_data.get("_scan_sources") or self.current_gemini_data.get("_provider_meta"))
             self.current_gemini_data["quelle"] = "modul1_scan" if has_scan else "modul1_manual"
@@ -1374,7 +1363,7 @@ class OrderEntryApp(QWidget):
                 self,
                 self.settings_manager,
                 self.current_gemini_data,
-                on_order_number_changed=_on_order_number_changed,
+                on_order_number_changed=make_order_number_callback(self.inputs, self.current_gemini_data),
                 show_new_number_info=True,
                 db=None,
             )

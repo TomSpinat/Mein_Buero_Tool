@@ -55,6 +55,9 @@ from module.shared_einkauf_review import (
   refresh_summen_banner,
   clear_einkauf_review_data,
   collect_einkauf_warnings,
+  build_einkauf_checklist,
+  format_checklist_text,
+  make_order_number_callback,
 )
 from module.normalization_dialog import NormalizationPanel
 from module.amazon_country_dialog import AmazonCountryPanel
@@ -3513,29 +3516,9 @@ class ScraperReviewWizardDialog(QDialog):
       )
 
       # Validierungs-Checkliste
-      def _field_ok(key):
-        w = self.inputs.get(key)
-        if w and hasattr(w, "text"):
-          return bool(str(w.text()).strip())
-        return False
-
-      checks = []
-      checks.append(("\u2713" if _field_ok("bestellnummer") else "\u2717") + " Bestellnummer")
-      checks.append(("\u2713" if _field_ok("shop_name") else "\u2717") + " Shop-Name")
-      checks.append(("\u2713" if _field_ok("bestell_datum") else "\u2717") + " Bestelldatum")
-
-      gesamt_ok = False
-      try:
-        g = self.inputs.get("gesamt_ekp_brutto")
-        if g and hasattr(g, "text"):
-          gesamt_ok = float(str(g.text()).replace(",", ".")) > 0
-      except (ValueError, TypeError):
-        pass
-      checks.append(("\u2713" if gesamt_ok else "\u2717") + " Gesamtpreis")
-      checks.append(("\u2713" if len(items_list) > 0 else "\u2717") + " Min. 1 Artikel")
-      checks.append(("\u2713" if self._mapping_done_by_index.get(self.current_index, False) else "\u2717") + " Mapping erledigt")
-
-      self.lbl_validation_checklist.setText("\n".join(checks))
+      checks = build_einkauf_checklist(self.einkauf_form_widget, items_list)
+      checks.append(("Mapping erledigt", self._mapping_done_by_index.get(self.current_index, False)))
+      self.lbl_validation_checklist.setText(format_checklist_text(checks))
 
     except Exception as e:
       log_exception(__name__, e)
@@ -3619,17 +3602,12 @@ class ScraperReviewWizardDialog(QDialog):
 
   def _execute_pipeline_save(self, payload):
     """Fuehrt den Pipeline-Save mit Review-Bundle und Bestaetigungsdialog aus."""
-    def _on_order_number_changed(new_no):
-      if "bestellnummer" in self.inputs:
-        self.inputs["bestellnummer"].setText(self._safe_text(new_no))
-      payload["bestellnummer"] = self._safe_text(new_no)
-
     review_bundle = self._refresh_order_review()
     save_result = EinkaufPipeline.confirm_and_save_single(
       self,
       self.settings_manager,
       payload,
-      on_order_number_changed=_on_order_number_changed,
+      on_order_number_changed=make_order_number_callback(self.inputs, payload, text_fn=self._safe_text),
       show_new_number_info=True,
       db=self._shared_db,
       review_bundle=review_bundle,
