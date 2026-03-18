@@ -29,14 +29,11 @@ from module.ean_service import EanService
 from module.ean_lookup_dialog import EanLookupDialog
 from module.ean_search_worker import EanLookupWorker
 from module.shop_logo_search_service import ShopLogoSearchService
-from module.shop_logo_search_worker import ShopLogoSearchWorker
 from module.product_image_search_service import ProductImageSearchService
 from module.product_image_search_worker import ProductImageSearchWorker
 from module.media.media_grid_selection_dialog import MediaGridSelectionDialog
-from module.media.media_keys import build_shop_key, build_product_key
 from module.media.media_service import MediaService
 
-from module.ui_media_pixmap import create_placeholder_pixmap, render_preview_pixmap
 from module.shared_search_workflows import (
     create_logo_search_worker,
     reset_logo_search_button,
@@ -684,52 +681,53 @@ class OrderEntryApp(QWidget):
     def _fill_ui(self):
         """Füllt das GUI aus dem current_gemini_data Dictionary."""
         if self.scan_mode == "einkauf":
-            # EinkaufHeadFormWidget.set_payload befuellt alle Felder + Shop-Vorschau in einem Zug
-            self.einkauf_form_widget.set_payload(self.current_gemini_data)
-
-            # Inline-Suggestions fuer unbekannte Felder (statt modale Dialoge)
-            field_suggestions = self.current_gemini_data.get("_field_suggestions", {})
-            if isinstance(field_suggestions, dict):
-                for field_key, suggestions in field_suggestions.items():
-                    widget = self.inputs.get(field_key)
-                    if widget and hasattr(widget, "set_suggestion_dropdown") and suggestions:
-                        widget.set_suggestion_dropdown(suggestions)
+            self._fill_einkauf_ui()
         else:
-            for db_key, line_edit in self.inputs.items():
-                value = str(self.current_gemini_data.get(db_key, ""))
-                if value == "None" or not value:
-                    value = ""
-                line_edit.setText(value)
+            self._fill_verkauf_ui()
 
-        waren = self.current_gemini_data.get("waren", [])
-
-        if self.scan_mode == "einkauf":
-            # EinkaufItemsTableWidget: set_items() befuellt alle 10 Spalten + EAN-Autofill
-            self.einkauf_items_widget.set_items(
-                waren,
-                ean_fill_callback=self.ean_service.find_best_local_ean_by_name,
-                payload=self.current_gemini_data,
-            )
-        else:
-            self.table_waren.setRowCount(len(waren))
-            for row, item in enumerate(waren):
-                produkt_name = str(item.get("produkt_name", "")).strip()
-                ean = str(item.get("ean", "")).strip()
-                if not ean and produkt_name:
-                    ean = self.ean_service.find_best_local_ean_by_name(produkt_name, str(item.get("varianten_info", "")))
-                self.table_waren.setItem(row, 0, QTableWidgetItem(produkt_name))
-                self.table_waren.setItem(row, 1, QTableWidgetItem(ean))
-                self.table_waren.setItem(row, 2, QTableWidgetItem(str(item.get("menge", "1"))))
-                self.table_waren.setItem(row, 3, QTableWidgetItem(str(item.get("vk_brutto", "0.00"))))
-                self.table_waren.setItem(row, 4, QTableWidgetItem(str(item.get("marge_gesamt", "0.00"))))
-            self.table_waren.resizeColumnsToContents()
-
-        # Summen-Banner und Save-Button-State aktualisieren
         self._update_summen_banner()
         self._update_save_button_state()
-
-        # Nach AI-Fill: Lookup-Bindings fuer die befuellten Felder triggern
         self._trigger_post_fill_lookups()
+
+    def _fill_einkauf_ui(self):
+        """Einkauf-Pfad: Kopfdaten + Artikel ueber EinkaufHeadFormWidget / EinkaufItemsTableWidget befuellen."""
+        self.einkauf_form_widget.set_payload(self.current_gemini_data)
+
+        # Inline-Suggestions fuer unbekannte Felder (statt modale Dialoge)
+        field_suggestions = self.current_gemini_data.get("_field_suggestions", {})
+        if isinstance(field_suggestions, dict):
+            for field_key, suggestions in field_suggestions.items():
+                widget = self.inputs.get(field_key)
+                if widget and hasattr(widget, "set_suggestion_dropdown") and suggestions:
+                    widget.set_suggestion_dropdown(suggestions)
+
+        self.einkauf_items_widget.set_items(
+            self.current_gemini_data.get("waren", []),
+            ean_fill_callback=self.ean_service.find_best_local_ean_by_name,
+            payload=self.current_gemini_data,
+        )
+
+    def _fill_verkauf_ui(self):
+        """Verkauf-Pfad (Legacy): Kopfdaten aus QLineEdits, Artikel aus QTableWidget befuellen."""
+        for db_key, line_edit in self.inputs.items():
+            value = str(self.current_gemini_data.get(db_key, ""))
+            if value == "None" or not value:
+                value = ""
+            line_edit.setText(value)
+
+        waren = self.current_gemini_data.get("waren", [])
+        self.table_waren.setRowCount(len(waren))
+        for row, item in enumerate(waren):
+            produkt_name = str(item.get("produkt_name", "")).strip()
+            ean = str(item.get("ean", "")).strip()
+            if not ean and produkt_name:
+                ean = self.ean_service.find_best_local_ean_by_name(produkt_name, str(item.get("varianten_info", "")))
+            self.table_waren.setItem(row, 0, QTableWidgetItem(produkt_name))
+            self.table_waren.setItem(row, 1, QTableWidgetItem(ean))
+            self.table_waren.setItem(row, 2, QTableWidgetItem(str(item.get("menge", "1"))))
+            self.table_waren.setItem(row, 3, QTableWidgetItem(str(item.get("vk_brutto", "0.00"))))
+            self.table_waren.setItem(row, 4, QTableWidgetItem(str(item.get("marge_gesamt", "0.00"))))
+        self.table_waren.resizeColumnsToContents()
 
     # ── Zentraler LookupService: Setup + Handler ──────────────────────
 
@@ -1150,50 +1148,7 @@ class OrderEntryApp(QWidget):
         self._finish_logo_search_ui()
         handle_logo_search_error(parent_widget=self, err_msg=err_msg)
 
-    # ── Produktbild-Suche (Google Custom Search API, 100 Gratis/Tag) ─
-
-    def _start_product_image_search(self, row):
-        if self.product_image_search_worker is not None and self.product_image_search_worker.isRunning():
-            CustomMsgBox.information(self, "Bildsuche", "Es laeuft bereits eine Bildsuche im Hintergrund.")
-            return
-
-        produkt_name = ""
-        varianten_info = ""
-        ean = ""
-
-        # Einkauf: Bild(0), Produkt(1), Variante(2), EAN(3) | Verkauf: Produkt(0), EAN(1)
-        name_col = 1 if self.scan_mode == "einkauf" else 0
-        var_col = 2 if self.scan_mode == "einkauf" else -1
-        ean_col = 3 if self.scan_mode == "einkauf" else 1
-
-        if self.table_waren.item(row, name_col):
-            produkt_name = self.table_waren.item(row, name_col).text().strip()
-        if var_col >= 0 and self.table_waren.item(row, var_col):
-            varianten_info = self.table_waren.item(row, var_col).text().strip()
-        if self.table_waren.item(row, ean_col):
-            ean = self.table_waren.item(row, ean_col).text().strip()
-
-        if not produkt_name:
-            CustomMsgBox.warning(self, "Bildsuche", "In der markierten Zeile fehlt der Produktname.")
-            return
-
-        self._pending_image_search_context = {
-            "row": row,
-            "produkt_name": produkt_name,
-            "varianten_info": varianten_info,
-            "ean": ean,
-        }
-
-        self.product_image_search_worker = ProductImageSearchWorker(
-            self.settings_manager,
-            produkt_name,
-            varianten_info=varianten_info,
-            ean=ean,
-            limit=6,
-        )
-        self.product_image_search_worker.result_signal.connect(self._on_product_image_search_finished)
-        self.product_image_search_worker.error_signal.connect(self._on_product_image_search_error)
-        self.product_image_search_worker.start()
+    # ── Produktbild-Suche (Einkauf-Pfad via EinkaufItemsTableWidget) ──
 
     def _on_product_image_search_finished(self, result_dict):
         context = dict(self._pending_image_search_context or {})
@@ -1224,7 +1179,7 @@ class OrderEntryApp(QWidget):
         try:
             db = DatabaseManager(self.settings_manager)
             media_service = MediaService(db)
-            result = media_service.register_remote_product_image(
+            media_service.register_remote_product_image(
                 product_name=produkt_name,
                 image_url=image_url,
                 ean=str(context.get("ean", "") or "").strip(),
@@ -1233,24 +1188,10 @@ class OrderEntryApp(QWidget):
                 source_kind="manual_web_selection",
                 source_ref=str(selected.get("source_page_url", "") or "").strip(),
             )
-            # Produktbild-Vorschau in der Tabelle aktualisieren
+            # EinkaufItemsTableWidget: Tabelle neu zeichnen, damit Bild-Preview aktualisiert wird
             target_row = context.get("row", -1)
-            if context.get("_via_einkauf_widget"):
-                # EinkaufItemsTableWidget: Tabelle neu zeichnen, damit Bild-Preview aktualisiert wird
-                if target_row >= 0:
-                    self.einkauf_items_widget.refresh_display(select_source_index=target_row)
-            else:
-                img_path = ""
-                if isinstance(result, dict):
-                    asset = result.get("asset") or {}
-                    img_path = str(asset.get("file_path", "") or "").strip()
-                if img_path and target_row >= 0:
-                    img_path = self._resolve_media_path(img_path)
-                    source_px = QPixmap(img_path)
-                    if not source_px.isNull():
-                        img_label = self.table_waren.cellWidget(target_row, 0)
-                        if isinstance(img_label, QLabel):
-                            img_label.setPixmap(render_preview_pixmap(source_px, 38, background="#ffffff", radius=6, inset=2))
+            if target_row >= 0:
+                self.einkauf_items_widget.refresh_display(select_source_index=target_row)
             CustomMsgBox.information(self, "Bildsuche", f"Produktbild fuer '{produkt_name}' wurde gespeichert.")
         except Exception as exc:
             log_exception(__name__, exc)
@@ -1261,17 +1202,6 @@ class OrderEntryApp(QWidget):
         self.product_image_search_worker = None
         msg = str(err_msg or "").strip() or "Unbekannter Fehler bei der Bildsuche."
         CustomMsgBox.warning(self, "Bildsuche", f"Die Bildsuche ist fehlgeschlagen:\n{msg}")
-
-    @staticmethod
-    def _resolve_media_path(rel_path):
-        """Loest einen relativen Media-Pfad zum absoluten Pfad auf."""
-        rel_path = str(rel_path or "").strip()
-        if not rel_path:
-            return ""
-        if os.path.isabs(rel_path):
-            return rel_path
-        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-        return os.path.join(project_root, rel_path)
 
     # ── Live-Validierung & Summen-Kontrolle ─────────────────────────────
 
@@ -1297,33 +1227,36 @@ class OrderEntryApp(QWidget):
     def _update_save_button_state(self):
         """Aktiviert/deaktiviert den Save-Button basierend auf Pflichtfeld-Validierung."""
         if self.scan_mode == "einkauf":
-            # Bestellnummer pruefen
-            bestellnummer_widget = self.inputs.get("bestellnummer")
-            bestellnummer = str(bestellnummer_widget.text()).strip() if bestellnummer_widget else ""
-
-            # Pflichtfeld-Markierung (auf das innere QLineEdit, nicht den aeusseren QWidget)
-            if bestellnummer_widget:
-                inner = getattr(bestellnummer_widget, "normal_input", bestellnummer_widget)
-                if not bestellnummer:
-                    inner.setStyleSheet(
-                        "QLineEdit { border: 1px solid #f7768e; background-color: #2d1f2f; }"
-                    )
-                    inner.setToolTip("Pflichtfeld: Bestellnummer muss ausgefuellt sein")
-                else:
-                    inner.setStyleSheet("")
-                    inner.setToolTip("")
-
-            # Mindestens 1 Position mit Produktname (ueber EinkaufItemsTableWidget)
-            items = self.einkauf_items_widget.get_items()
-            has_item = any(str(it.get("produkt_name", "")).strip() for it in items)
-
-            can_save = bool(bestellnummer) and has_item
-            self.btn_save_db.setEnabled(can_save)
+            self.btn_save_db.setEnabled(self._check_einkauf_save_ready())
         else:
-            # Verkauf-Modus: Ticket-Name pruefen
-            ticket_widget = self.inputs.get("ticket_name")
-            ticket_name = str(ticket_widget.text()).strip() if ticket_widget else ""
-            self.btn_save_db.setEnabled(bool(ticket_name) and self.table_waren.rowCount() > 0)
+            self.btn_save_db.setEnabled(self._check_verkauf_save_ready())
+
+    def _check_einkauf_save_ready(self):
+        """Einkauf-Pfad: Bestellnummer + mindestens 1 Position mit Produktname."""
+        bestellnummer_widget = self.inputs.get("bestellnummer")
+        bestellnummer = str(bestellnummer_widget.text()).strip() if bestellnummer_widget else ""
+
+        # Pflichtfeld-Markierung (auf das innere QLineEdit, nicht den aeusseren QWidget)
+        if bestellnummer_widget:
+            inner = getattr(bestellnummer_widget, "normal_input", bestellnummer_widget)
+            if not bestellnummer:
+                inner.setStyleSheet(
+                    "QLineEdit { border: 1px solid #f7768e; background-color: #2d1f2f; }"
+                )
+                inner.setToolTip("Pflichtfeld: Bestellnummer muss ausgefuellt sein")
+            else:
+                inner.setStyleSheet("")
+                inner.setToolTip("")
+
+        items = self.einkauf_items_widget.get_items()
+        has_item = any(str(it.get("produkt_name", "")).strip() for it in items)
+        return bool(bestellnummer) and has_item
+
+    def _check_verkauf_save_ready(self):
+        """Verkauf-Pfad (Legacy): Ticket-Name + mindestens 1 Zeile in der Tabelle."""
+        ticket_widget = self.inputs.get("ticket_name")
+        ticket_name = str(ticket_widget.text()).strip() if ticket_widget else ""
+        return bool(ticket_name) and self.table_waren.rowCount() > 0
 
     # ── Zeilen-Management (+ Zeile / - Markierte) ──────────────────────
 
@@ -1366,200 +1299,213 @@ class OrderEntryApp(QWidget):
         self._update_save_button_state()
 
     def _reset_form(self):
+        # Gemeinsamer Reset: Scan-Eingaben leeren
         self.drop_box.current_pixmap = None
         self.drop_box.current_source_path = None
         self.selected_document_path = None
         self.scan_temp_file_path = None
         self.drop_box.lbl_text.setPixmap(QPixmap())
         self.drop_box.lbl_text.setText("Drag & Drop hier\noder Strg+V / Datei-Auswahl (Bild/PDF)")
-
         self.txt_anweisung.clear()
 
+        # Modus-spezifische Felder/Tabellen leeren
         if self.scan_mode == "einkauf":
-            # clear_values() leert alle InlineChangeFieldRows, blendet Shop-Vorschau aus
-            self.einkauf_form_widget.clear_values()
-            # Suggestion-Dropdowns aufraeumen
-            for widget in self.inputs.values():
-                if hasattr(widget, "clear_suggestions"):
-                    widget.clear_suggestions()
-            # EinkaufItemsTableWidget leeren
-            self.einkauf_items_widget.clear_items()
+            self._reset_einkauf_state()
         else:
-            for le in self.inputs.values():
-                le.clear()
-            self.table_waren.setRowCount(0)
+            self._reset_verkauf_state()
 
+        # Gemeinsamer Reset: Zustand zuruecksetzen
         self.current_gemini_data = {}
         self.summen_banner.setVisible(False)
-
         self.btn_scan.setEnabled(False)
         self.btn_save_db.setEnabled(False)
-
-        # Image-Search Worker cleanup
         self.logo_search_worker = None
         self.product_image_search_worker = None
         self._pending_image_search_context = None
 
+    def _reset_einkauf_state(self):
+        """Einkauf-Pfad: Kopfdaten-Widget + Artikel-Widget leeren."""
+        self.einkauf_form_widget.clear_values()
+        for widget in self.inputs.values():
+            if hasattr(widget, "clear_suggestions"):
+                widget.clear_suggestions()
+        self.einkauf_items_widget.clear_items()
+
+    def _reset_verkauf_state(self):
+        """Verkauf-Pfad (Legacy): QLineEdits + QTableWidget leeren."""
+        for le in self.inputs.values():
+            le.clear()
+        self.table_waren.setRowCount(0)
+
     def _save_to_database(self):
-        # UI-Aenderungen zurueck in das gemini dict spielen
+        """Dispatcher: leitet je nach Modus an den passenden Save-Workflow weiter."""
         if self.scan_mode == "einkauf":
-            # apply_to_payload uebernimmt alle InlineChangeFieldRow-Werte (inkl. review-Selektion)
-            # sowie die Reverse-Charge-Checkbox
-            self.current_gemini_data = self.einkauf_form_widget.apply_to_payload(self.current_gemini_data)
-
-            # Waren aus EinkaufItemsTableWidget auslesen
-            waren_liste = self.einkauf_items_widget.get_items()
-            if not waren_liste:
-                CustomMsgBox.warning(self, "Validierung", "Keine Artikel vorhanden. Bitte mindestens eine Position hinzufuegen.")
-                return
-            has_valid_item = any(str(it.get("produkt_name", "")).strip() for it in waren_liste)
-            if not has_valid_item:
-                CustomMsgBox.warning(self, "Validierung", "Mindestens eine Position muss einen Produktnamen haben.")
-                return
-            self.current_gemini_data["waren"] = waren_liste
+            self._save_einkauf()
         else:
-            for db_key, line_edit in self.inputs.items():
-                self.current_gemini_data[db_key] = line_edit.text()
+            self._save_verkauf()
 
-            # Validierung: Mindestens 1 Position mit Produktname erforderlich (Verkauf)
-            rows = self.table_waren.rowCount()
-            if rows == 0:
-                CustomMsgBox.warning(self, "Validierung", "Keine Artikel vorhanden. Bitte mindestens eine Position hinzufuegen.")
-                return
-            has_valid_item = any(
-                self.table_waren.item(r, 0) and str(self.table_waren.item(r, 0).text()).strip()
-                for r in range(rows)
+    # ── Einkauf-Save ─────────────────────────────────────────────────
+
+    def _save_einkauf(self):
+        """Einkauf-Pfad: Payload aus Widgets aufbauen, Pipeline-Save, Bild-Decisions, Matching."""
+        # Kopfdaten aus EinkaufHeadFormWidget uebernehmen
+        self.current_gemini_data = self.einkauf_form_widget.apply_to_payload(self.current_gemini_data)
+
+        # Waren aus EinkaufItemsTableWidget auslesen + validieren
+        waren_liste = self.einkauf_items_widget.get_items()
+        if not waren_liste:
+            CustomMsgBox.warning(self, "Validierung", "Keine Artikel vorhanden. Bitte mindestens eine Position hinzufuegen.")
+            return
+        if not any(str(it.get("produkt_name", "")).strip() for it in waren_liste):
+            CustomMsgBox.warning(self, "Validierung", "Mindestens eine Position muss einen Produktnamen haben.")
+            return
+        self.current_gemini_data["waren"] = waren_liste
+
+        def _on_order_number_changed(new_no):
+            self.current_gemini_data["bestellnummer"] = new_no
+            if "bestellnummer" in self.inputs:
+                self.inputs["bestellnummer"].setText(new_no)
+
+        try:
+            has_scan = bool(self.current_gemini_data.get("_scan_sources") or self.current_gemini_data.get("_provider_meta"))
+            self.current_gemini_data["quelle"] = "modul1_scan" if has_scan else "modul1_manual"
+
+            save_result = EinkaufPipeline.confirm_and_save_single(
+                self,
+                self.settings_manager,
+                self.current_gemini_data,
+                on_order_number_changed=_on_order_number_changed,
+                show_new_number_info=True,
+                db=None,
             )
-            if not has_valid_item:
-                CustomMsgBox.warning(self, "Validierung", "Mindestens eine Position muss einen Produktnamen haben.")
-                return
-            waren_liste = []
-            for r in range(rows):
-                w = {
-                    "produkt_name": self.table_waren.item(r, 0).text() if self.table_waren.item(r, 0) else "",
-                    "ean": self.table_waren.item(r, 1).text() if self.table_waren.item(r, 1) else "",
-                    "menge": self.table_waren.item(r, 2).text() if self.table_waren.item(r, 2) else "1",
-                    "vk_brutto": self.table_waren.item(r, 3).text() if self.table_waren.item(r, 3) else "0.00",
-                    "marge_gesamt": self.table_waren.item(r, 4).text() if self.table_waren.item(r, 4) else "0.00"
-                }
-                waren_liste.append(w)
-            self.current_gemini_data["waren"] = waren_liste
 
-        if self.scan_mode == "einkauf":
-            def _on_order_number_changed(new_no):
-                self.current_gemini_data["bestellnummer"] = new_no
-                if "bestellnummer" in self.inputs:
-                    self.inputs["bestellnummer"].setText(new_no)
-
-            try:
-                has_scan = bool(self.current_gemini_data.get("_scan_sources") or self.current_gemini_data.get("_provider_meta"))
-                self.current_gemini_data["quelle"] = "modul1_scan" if has_scan else "modul1_manual"
-
-                save_result = EinkaufPipeline.confirm_and_save_single(
-                    self,
-                    self.settings_manager,
-                    self.current_gemini_data,
-                    on_order_number_changed=_on_order_number_changed,
-                    show_new_number_info=True,
-                    db=None
-                )
-
-                if save_result.get("status") != "saved":
-                    return
-
-                # Gemerkte Bildentscheidungen aus dem EinkaufItemsTableWidget anwenden
-                einkauf_id = save_result.get("einkauf_id")
-                save_db = save_result.get("db")
-                if einkauf_id and save_db:
-                    self.einkauf_items_widget.apply_saved_image_decisions(save_db, einkauf_id)
-
-                match_result = EinkaufPipeline.confirm_and_apply_pending_matches(
-                    self,
-                    self.settings_manager,
-                    db=save_db
-                )
-                self._reset_form()
-            except Exception as e:
-                log_exception(__name__, e)
-                CustomMsgBox.critical(self, "Datenbank-Fehler", str(e))
-        else:
-            if not self.current_gemini_data.get("ticket_name", "").strip():
-                CustomMsgBox.warning(self, "Fehler", "Ticket-Name fehlt!")
+            if save_result.get("status") != "saved":
                 return
 
-            try:
-                db = DatabaseManager(self.settings_manager)
-                matched_items, pending_units, pending_summary = db.preview_verkauf_discord(self.current_gemini_data)
+            # Gemerkte Bildentscheidungen aus dem EinkaufItemsTableWidget anwenden
+            einkauf_id = save_result.get("einkauf_id")
+            save_db = save_result.get("db")
+            if einkauf_id and save_db:
+                self.einkauf_items_widget.apply_saved_image_decisions(save_db, einkauf_id)
 
-                msg_parts = []
-                if matched_items:
-                    msg_parts.append(f"{len(matched_items)} Stück werden sofort mit vorhandenen Bestellungen verknüpft:\n")
-                    for match in matched_items[:8]:
-                        match_date = match["kaufdatum"].strftime("%d.%m.%Y") if match.get("kaufdatum") else "?"
-                        msg_parts.append(f"- {match['bestellnummer']} ({match_date}) | {match['produkt_name']}")
-                    if len(matched_items) > 8:
-                        msg_parts.append(f"- ... und {len(matched_items) - 8} weitere")
+            EinkaufPipeline.confirm_and_apply_pending_matches(
+                self,
+                self.settings_manager,
+                db=save_db,
+            )
+            self._reset_form()
+        except Exception as e:
+            log_exception(__name__, e)
+            CustomMsgBox.critical(self, "Datenbank-Fehler", str(e))
 
-                if pending_units:
-                    if msg_parts:
-                        msg_parts.append("")
-                    msg_parts.append(f"{len(pending_units)} Stück bleiben als 'ticket folgt' offen und werden später automatisch nachverknüpft:\n")
-                    for line in pending_summary[:8]:
-                        msg_parts.append(f"- {line}")
-                    if len(pending_summary) > 8:
-                        msg_parts.append(f"- ... und {len(pending_summary) - 8} weitere")
+    # ── Verkauf-Save (Legacy) ────────────────────────────────────────
 
-                if not msg_parts:
-                    msg_parts.append("Für dieses Ticket wurden aktuell keine verwertbaren Positionen erkannt.")
+    def _save_verkauf(self):
+        """Verkauf-Pfad (Legacy): Payload aus QLineEdits/QTableWidget, Discord-Matching, Speichern."""
+        # Kopfdaten aus Legacy-QLineEdits uebernehmen
+        for db_key, line_edit in self.inputs.items():
+            self.current_gemini_data[db_key] = line_edit.text()
 
-                msg_parts.append("")
-                msg_parts.append("Matching jetzt anwenden?")
-                msg_parts.append("Yes = Ticket speichern + Matching anwenden")
-                msg_parts.append("No = Ticket speichern ohne Matching (alles bleibt ticket folgt)")
-                msg_parts.append("Cancel = Abbrechen")
+        if not self.current_gemini_data.get("ticket_name", "").strip():
+            CustomMsgBox.warning(self, "Fehler", "Ticket-Name fehlt!")
+            return
 
-                reply = CustomMsgBox.question(
+        # Waren aus Legacy-QTableWidget auslesen + validieren
+        rows = self.table_waren.rowCount()
+        if rows == 0:
+            CustomMsgBox.warning(self, "Validierung", "Keine Artikel vorhanden. Bitte mindestens eine Position hinzufuegen.")
+            return
+        if not any(
+            self.table_waren.item(r, 0) and str(self.table_waren.item(r, 0).text()).strip()
+            for r in range(rows)
+        ):
+            CustomMsgBox.warning(self, "Validierung", "Mindestens eine Position muss einen Produktnamen haben.")
+            return
+
+        waren_liste = []
+        for r in range(rows):
+            waren_liste.append({
+                "produkt_name": self.table_waren.item(r, 0).text() if self.table_waren.item(r, 0) else "",
+                "ean": self.table_waren.item(r, 1).text() if self.table_waren.item(r, 1) else "",
+                "menge": self.table_waren.item(r, 2).text() if self.table_waren.item(r, 2) else "1",
+                "vk_brutto": self.table_waren.item(r, 3).text() if self.table_waren.item(r, 3) else "0.00",
+                "marge_gesamt": self.table_waren.item(r, 4).text() if self.table_waren.item(r, 4) else "0.00",
+            })
+        self.current_gemini_data["waren"] = waren_liste
+
+        try:
+            db = DatabaseManager(self.settings_manager)
+            matched_items, pending_units, pending_summary = db.preview_verkauf_discord(self.current_gemini_data)
+
+            msg_parts = []
+            if matched_items:
+                msg_parts.append(f"{len(matched_items)} Stück werden sofort mit vorhandenen Bestellungen verknüpft:\n")
+                for match in matched_items[:8]:
+                    match_date = match["kaufdatum"].strftime("%d.%m.%Y") if match.get("kaufdatum") else "?"
+                    msg_parts.append(f"- {match['bestellnummer']} ({match_date}) | {match['produkt_name']}")
+                if len(matched_items) > 8:
+                    msg_parts.append(f"- ... und {len(matched_items) - 8} weitere")
+
+            if pending_units:
+                if msg_parts:
+                    msg_parts.append("")
+                msg_parts.append(f"{len(pending_units)} Stück bleiben als 'ticket folgt' offen und werden später automatisch nachverknüpft:\n")
+                for line in pending_summary[:8]:
+                    msg_parts.append(f"- {line}")
+                if len(pending_summary) > 8:
+                    msg_parts.append(f"- ... und {len(pending_summary) - 8} weitere")
+
+            if not msg_parts:
+                msg_parts.append("Für dieses Ticket wurden aktuell keine verwertbaren Positionen erkannt.")
+
+            msg_parts.append("")
+            msg_parts.append("Matching jetzt anwenden?")
+            msg_parts.append("Yes = Ticket speichern + Matching anwenden")
+            msg_parts.append("No = Ticket speichern ohne Matching (alles bleibt ticket folgt)")
+            msg_parts.append("Cancel = Abbrechen")
+
+            reply = CustomMsgBox.question(
+                self,
+                "Discord-Ticket speichern",
+                "\n".join(msg_parts),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Yes,
+            )
+            if reply == QMessageBox.StandardButton.Cancel:
+                return
+
+            if reply == QMessageBox.StandardButton.No:
+                forced_pending = list(pending_units)
+                for match in matched_items:
+                    forced_pending.append({
+                        "ware_index": match.get("ware_index", 0),
+                        "unit_index": 0,
+                        "produkt_name": match.get("ticket_produkt", match.get("produkt_name", "")),
+                        "ean": match.get("ean", ""),
+                        "vk_brutto": match.get("vk_brutto", 0.0),
+                        "marge_gesamt": match.get("marge_gesamt", 0.0),
+                    })
+                matched_items = []
+                pending_units = forced_pending
+
+            result = db.confirm_verkauf_discord(self.current_gemini_data, matched_items, pending_units)
+            if result.get("pending_count", 0) > 0:
+                CustomMsgBox.information(
                     self,
-                    "Discord-Ticket speichern",
-                    "\n".join(msg_parts),
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
-                    QMessageBox.StandardButton.Yes
+                    "Gespeichert",
+                    f"Ticket gespeichert. {result.get('matched_count', 0)} Stück direkt verknüpft, {result.get('pending_count', 0)} Stück warten als 'ticket folgt'.",
                 )
-                if reply == QMessageBox.StandardButton.Cancel:
-                    return
+            else:
+                CustomMsgBox.information(
+                    self,
+                    "Erfolg",
+                    f"Ticket gespeichert und {result.get('matched_count', 0)} Stück direkt verknüpft.",
+                )
+            self._reset_form()
 
-                if reply == QMessageBox.StandardButton.No:
-                    forced_pending = list(pending_units)
-                    for match in matched_items:
-                        forced_pending.append({
-                            "ware_index": match.get("ware_index", 0),
-                            "unit_index": 0,
-                            "produkt_name": match.get("ticket_produkt", match.get("produkt_name", "")),
-                            "ean": match.get("ean", ""),
-                            "vk_brutto": match.get("vk_brutto", 0.0),
-                            "marge_gesamt": match.get("marge_gesamt", 0.0)
-                        })
-                    matched_items = []
-                    pending_units = forced_pending
-
-                result = db.confirm_verkauf_discord(self.current_gemini_data, matched_items, pending_units)
-                if result.get("pending_count", 0) > 0:
-                    CustomMsgBox.information(
-                        self,
-                        "Gespeichert",
-                        f"Ticket gespeichert. {result.get('matched_count', 0)} Stück direkt verknüpft, {result.get('pending_count', 0)} Stück warten als 'ticket folgt'."
-                    )
-                else:
-                    CustomMsgBox.information(
-                        self,
-                        "Erfolg",
-                        f"Ticket gespeichert und {result.get('matched_count', 0)} Stück direkt verknüpft."
-                    )
-                self._reset_form()
-
-            except Exception as e:
-                log_exception(__name__, e)
-                CustomMsgBox.critical(self, "Datenbank Fehler", f"Speichern fehlgeschlagen:\n{e}")
+        except Exception as e:
+            log_exception(__name__, e)
+            CustomMsgBox.critical(self, "Datenbank Fehler", f"Speichern fehlgeschlagen:\n{e}")
 
     def _build_db_tab(self):
         top_layout = QHBoxLayout()
