@@ -2000,7 +2000,7 @@ class ScraperReviewWizardDialog(QDialog):
       QTimer.singleShot(0, self.reject)
       return
 
-    self._load_current_mail()
+    self._activate_mail(0)
 
   def _build_ui(self):
     layout = QVBoxLayout(self)
@@ -2547,8 +2547,7 @@ class ScraperReviewWizardDialog(QDialog):
     if idx == self.current_index:
       return
     if 0 <= idx < len(self.data_list) and self._mail_status[idx] == "pending":
-      self.current_index = idx
-      self._load_current_mail()
+      self._activate_mail(idx)
 
   def _nav_go_prev(self):
     """Zur vorherigen pending Mail."""
@@ -3010,6 +3009,24 @@ class ScraperReviewWizardDialog(QDialog):
     )
     gesamt = (payload or {}).get("gesamt_ekp_brutto") if isinstance(payload, dict) else None
     self.summen_banner.update_from_items(waren or [], gesamt)
+
+  # ── Lifecycle: Aktivierung / Teardown ────────────────────────
+
+  def _activate_mail(self, idx):
+    """Setzt den aktuellen Index und laedt die Mail vollstaendig."""
+    self.current_index = idx
+    self._load_current_mail()
+
+  def _teardown_current_mail(self):
+    """Raeumt die aktuelle Mail auf (Preview-Dialoge schliessen, Assets bereinigen)."""
+    current_item = self._current_mail_record() or None
+    self._close_preview_dialogs()
+    self._cleanup_mail_assets(current_item)
+
+  def _teardown_dialog(self):
+    """Raeumt beim Schliessen des gesamten Dialogs auf."""
+    self._close_preview_dialogs()
+    self._cleanup_all_mail_assets()
 
   def _load_current_mail(self):
     """Laedt die aktuelle Mail und aktualisiert alle UI-Bereiche.
@@ -3682,15 +3699,12 @@ class ScraperReviewWizardDialog(QDialog):
 
   def _cleanup_and_advance(self):
     """Raeumt aktuelle Mail auf und navigiert zur naechsten pending Mail."""
-    current_item = self._current_mail_record() or None
-    self._close_preview_dialogs()
-    self._cleanup_mail_assets(current_item)
+    self._teardown_current_mail()
     next_idx = self._find_next_pending_index()
     if next_idx < 0:
       self.accept()
       return
-    self.current_index = next_idx
-    self._load_current_mail()
+    self._activate_mail(next_idx)
 
   def _open_large_preview(self):
     item = self._current_mail_record()
@@ -3817,18 +3831,15 @@ class ScraperReviewWizardDialog(QDialog):
     return dict(self.summary)
 
   def accept(self):
-    self._close_preview_dialogs()
-    self._cleanup_all_mail_assets()
+    self._teardown_dialog()
     super().accept()
 
   def reject(self):
-    self._close_preview_dialogs()
-    self._cleanup_all_mail_assets()
+    self._teardown_dialog()
     super().reject()
 
   def closeEvent(self, event):
-    self._close_preview_dialogs()
-    self._cleanup_all_mail_assets()
+    self._teardown_dialog()
     super().closeEvent(event)
 
 
