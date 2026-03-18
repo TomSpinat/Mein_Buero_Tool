@@ -2794,6 +2794,29 @@ class ScraperReviewWizardDialog(QDialog):
   def _current_mail_item(self):
     return self.data_list[self.current_index]
 
+  # ── Aktuelle-Mail-Helfer (lokale Kapselung) ───────────────────
+
+  def _has_current_mail(self):
+    """Prueft, ob der aktuelle Index gueltig ist."""
+    return 0 <= self.current_index < len(self.data_list)
+
+  def _current_mail_record(self):
+    """Gibt den aktuellen Mail-Record zurueck, default {}."""
+    if self._has_current_mail():
+      return self.data_list[self.current_index]
+    return {}
+
+  def _update_current_mail_preview_and_attachments(self):
+    """Rendert Preview und Anhaenge-Sektion fuer die aktuelle Mail."""
+    self._render_current_preview()
+    self._populate_attachment_preview()
+
+  def _update_current_mail_badges(self):
+    """Aktualisiert alle Status-Badges der aktuellen Mail."""
+    self._check_duplicate_for_current()
+    self._update_konfidenz_badge()
+    self._update_absender_badge()
+
   def _build_preview_render_result(self, item):
     return SafeMailRenderer.prepare_html(
       item.get("_original_email_html", ""),
@@ -2984,15 +3007,14 @@ class ScraperReviewWizardDialog(QDialog):
     self.summen_banner.update_from_items(waren or [], gesamt)
 
   def _load_current_mail(self):
-    item = self.data_list[self.current_index]
+    item = self._current_mail_record()
     self._set_progress_text()
 
     state = self._ensure_mapping_state_for_index(self.current_index, rebuild=False, source_payload=item)
     self._apply_payload_to_current_mail(state.get("payload", {}))
     item = self._current_mail_item()
 
-    self._render_current_preview()
-    self._populate_attachment_preview()
+    self._update_current_mail_preview_and_attachments()
     self._update_mapping_state_ui()
     if item.get("_primary_scan_source_type", "") == "mail_attachment" and self._pdf_attachment_rows(item):
       self.preview_tabs.setCurrentIndex(1)
@@ -3010,9 +3032,7 @@ class ScraperReviewWizardDialog(QDialog):
     QTimer.singleShot(0, lambda idx=idx: self._auto_prompt_mapping_for_index(idx))
 
     # --- Duplikat-Pre-Check + Konfidenz + Absender ---
-    self._check_duplicate_for_current()
-    self._update_konfidenz_badge()
-    self._update_absender_badge()
+    self._update_current_mail_badges()
 
     # --- Navigationsleiste + Stats aktualisieren ---
     self._update_nav_dots()
@@ -3046,7 +3066,7 @@ class ScraperReviewWizardDialog(QDialog):
       if str(paketdienst_widget.text()).strip():
         return  # bereits ausgefuellt
 
-      item = self.data_list[self.current_index] if self.current_index < len(self.data_list) else {}
+      item = self._current_mail_record()
       search_texts = [
         str(item.get("tracking_nummer_einkauf", "") or "").lower(),
         str(item.get("shop_name", "") or "").lower(),
@@ -3067,7 +3087,7 @@ class ScraperReviewWizardDialog(QDialog):
       self._current_rechnung_pdf_path = ""
       self.lbl_rechnung_pdf_path.setText("")
       self.chk_rechnung_vorhanden.setChecked(False)
-      item = self.data_list[self.current_index] if self.current_index < len(self.data_list) else {}
+      item = self._current_mail_record()
       attachments = item.get("_attachments") or item.get("attachments") or []
       has_pdf = False
       auto_invoice = False
@@ -3089,7 +3109,7 @@ class ScraperReviewWizardDialog(QDialog):
   def _update_absender_badge(self):
     """Warnt dezent wenn die Absender-Domain nicht in den bekannten Mappings ist."""
     try:
-      item = self.data_list[self.current_index] if self.current_index < len(self.data_list) else {}
+      item = self._current_mail_record()
       sender = str(item.get("_email_sender", "") or item.get("bestell_email", "") or "").strip().lower()
       if not sender or "@" not in sender:
         self.lbl_absender_badge.setVisible(False)
@@ -3299,7 +3319,7 @@ class ScraperReviewWizardDialog(QDialog):
       return None
 
   def _collect_current_payload(self):
-    base = dict(self.data_list[self.current_index])
+    base = dict(self._current_mail_record())
     base = self.einkauf_form_widget.apply_to_payload(base)
     base["waren"] = self.einkauf_items_widget.get_items()
     return base
@@ -3409,7 +3429,7 @@ class ScraperReviewWizardDialog(QDialog):
   def _on_link_invoice_pdf(self):
     """Verknuepft den ersten PDF-Anhang der aktuellen Mail als Rechnung."""
     try:
-      item = self.data_list[self.current_index] if self.current_index < len(self.data_list) else {}
+      item = self._current_mail_record()
       pdf_path = ""
       for attachment in (item.get("_attachments") or item.get("attachments") or []):
         path = str(attachment.get("path", "") or attachment.get("file_path", "") or "").strip()
@@ -3430,7 +3450,7 @@ class ScraperReviewWizardDialog(QDialog):
   def _update_uebersicht_tab(self):
     """Aktualisiert Auto-Mapping-Log, Warnungen und Validierungs-Checkliste."""
     try:
-      item = self.data_list[self.current_index] if self.current_index < len(self.data_list) else {}
+      item = self._current_mail_record()
 
       # Auto-Mapping-Log
       auto_mapped = item.get("_auto_mapped_fields", {})
@@ -3518,7 +3538,7 @@ class ScraperReviewWizardDialog(QDialog):
         return
 
       payload = self._collect_current_payload()
-      item = self.data_list[self.current_index]
+      item = self._current_mail_record()
       payload["quelle"] = "mail_scraper"
       payload["mail_uid"] = str(item.get("_mail_uid", "") or "").strip()
       payload["mail_account"] = str(item.get("_mail_account", "") or "").strip()
@@ -3526,7 +3546,8 @@ class ScraperReviewWizardDialog(QDialog):
         payload["rechnung_vorhanden"] = True
         if self._current_rechnung_pdf_path:
           payload["rechnung_pdf_pfad"] = self._current_rechnung_pdf_path
-      self.data_list[self.current_index] = payload
+      if self._has_current_mail():
+        self.data_list[self.current_index] = payload
 
       def _on_order_number_changed(new_no):
         if "bestellnummer" in self.inputs:
@@ -3599,7 +3620,7 @@ class ScraperReviewWizardDialog(QDialog):
     self._advance_to_next()
 
   def _open_large_preview(self):
-    item = self.data_list[self.current_index]
+    item = self._current_mail_record()
     payload = {
       "preview_kind": "mail",
       "shop_name": self._safe_text(item.get("shop_name", "Unbekannt")),
@@ -3626,7 +3647,7 @@ class ScraperReviewWizardDialog(QDialog):
       QMessageBox.warning(self, "PDF Vorschau", "Der PDF-Anhang ist nicht mehr verfuegbar.")
       return
 
-    item = self.data_list[self.current_index]
+    item = self._current_mail_record()
     payload = {
       "preview_kind": "pdf",
       "attachment_name": self._safe_text(attachment.get("original_name", "PDF-Anhang")) or "PDF-Anhang",
@@ -3708,7 +3729,7 @@ class ScraperReviewWizardDialog(QDialog):
       self._cleanup_mail_assets(item)
 
   def _advance_to_next(self):
-    current_item = self.data_list[self.current_index] if 0 <= self.current_index < len(self.data_list) else None
+    current_item = self.data_list[self.current_index] if self._has_current_mail() else None
     self._close_preview_dialogs()
     self._cleanup_mail_assets(current_item)
     # Naechste pending Mail suchen
