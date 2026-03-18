@@ -2509,7 +2509,7 @@ class ScraperReviewWizardDialog(QDialog):
 
   def _update_mail_info_banner(self):
     """Aktualisiert Absender, Betreff, Datum im oberen Banner."""
-    item = self._current_mail_item()
+    item = self._current_mail_record()
     sender = str(item.get("_email_sender", "") or "").strip()
     subject = str(item.get("subject", "") or item.get("_email_subject", "") or "").strip()
     date = str(item.get("_email_date", "") or "").strip()
@@ -2612,10 +2612,10 @@ class ScraperReviewWizardDialog(QDialog):
     self.einkauf_form_widget.set_payload(payload)
 
   def _apply_payload_to_current_mail(self, payload):
-    merged = dict(self.data_list[self.current_index])
+    merged = dict(self._current_mail_record())
     if isinstance(payload, dict):
       merged.update(payload)
-    self.data_list[self.current_index] = merged
+    self._set_current_mail_data(merged)
     self._set_form_fields_from_payload(merged)
     self._populate_items_table(merged.get("waren", []), payload=merged)
     self._refresh_order_review()
@@ -2791,9 +2791,6 @@ class ScraperReviewWizardDialog(QDialog):
       self.lbl_mapping_badge.setVisible(False)
       self._set_mapping_panel_collapsed(True)
 
-  def _current_mail_item(self):
-    return self.data_list[self.current_index]
-
   # ── Aktuelle-Mail-Helfer (lokale Kapselung) ───────────────────
 
   def _has_current_mail(self):
@@ -2805,6 +2802,14 @@ class ScraperReviewWizardDialog(QDialog):
     if self._has_current_mail():
       return self.data_list[self.current_index]
     return {}
+
+  def _set_current_mail_data(self, data):
+    """Schreibt den Datensatz fuer die aktuelle Mail zurueck in data_list."""
+    if self._has_current_mail():
+      self.data_list[self.current_index] = data
+
+  # Alias: Abwaertskompatibilitaet – bevorzuge _current_mail_record().
+  _current_mail_item = _current_mail_record
 
   def _update_current_mail_preview_and_attachments(self):
     """Rendert Preview und Anhaenge-Sektion fuer die aktuelle Mail."""
@@ -2834,7 +2839,7 @@ class ScraperReviewWizardDialog(QDialog):
     self.btn_trust_domain_preview.setVisible(render_result.can_trust_domain)
 
   def _render_current_preview(self):
-    item = self._current_mail_item()
+    item = self._current_mail_record()
     render_result = self._build_preview_render_result(item)
     self._current_preview_render_result = render_result
     SafeMailRenderer.apply_to_view(self.preview_web, render_result)
@@ -2857,7 +2862,7 @@ class ScraperReviewWizardDialog(QDialog):
       log_exception(__name__, e)
 
   def _pdf_attachment_rows(self, item=None):
-    item = item if isinstance(item, dict) else self._current_mail_item()
+    item = item if isinstance(item, dict) else self._current_mail_record()
     rows = []
     for attachment in list(item.get("_mail_pdf_attachments", []) or []):
       if not isinstance(attachment, dict):
@@ -2931,7 +2936,7 @@ class ScraperReviewWizardDialog(QDialog):
       self.pdf_preview_web.setHtml("<html><body style='background-color:#10111a;color:#a9b1d6;font-family:Segoe UI,sans-serif;'><div style='padding:18px;'>Keine PDF-Vorschau verfuegbar.</div></body></html>")
 
   def _populate_attachment_preview(self):
-    attachments = self._pdf_attachment_rows(self._current_mail_item())
+    attachments = self._pdf_attachment_rows(self._current_mail_record())
     self.cmb_attachment_pdf.blockSignals(True)
     self.cmb_attachment_pdf.clear()
     for index, attachment in enumerate(attachments):
@@ -2981,18 +2986,18 @@ class ScraperReviewWizardDialog(QDialog):
     self._load_pdf_into_embedded_preview(pdf_path)
 
   def _allow_external_for_current_mail(self):
-    item = self._current_mail_item()
+    item = self._current_mail_record()
     item["_allow_external_preview_once"] = True
     self._render_current_preview()
 
   def _trust_current_sender(self):
-    item = self._current_mail_item()
+    item = self._current_mail_record()
     SafeMailRenderer.trust_sender(self.settings_manager, item.get("_email_sender", ""))
     item["_allow_external_preview_once"] = True
     self._render_current_preview()
 
   def _trust_current_domain(self):
-    item = self._current_mail_item()
+    item = self._current_mail_record()
     SafeMailRenderer.trust_domain(self.settings_manager, item.get("_email_sender", ""))
     item["_allow_external_preview_once"] = True
     self._render_current_preview()
@@ -3012,7 +3017,7 @@ class ScraperReviewWizardDialog(QDialog):
 
     state = self._ensure_mapping_state_for_index(self.current_index, rebuild=False, source_payload=item)
     self._apply_payload_to_current_mail(state.get("payload", {}))
-    item = self._current_mail_item()
+    item = self._current_mail_record()
 
     self._update_current_mail_preview_and_attachments()
     self._update_mapping_state_ui()
@@ -3186,7 +3191,7 @@ class ScraperReviewWizardDialog(QDialog):
   def _check_duplicate_for_current(self):
     """Prueft ob die Bestellnummer der aktuellen Mail bereits in der DB existiert."""
     try:
-      item = self._current_mail_item()
+      item = self._current_mail_record()
       bestellnummer = str(item.get("bestellnummer", "") or "").strip()
       if not bestellnummer:
         self.lbl_duplicate_badge.setVisible(False)
@@ -3212,7 +3217,7 @@ class ScraperReviewWizardDialog(QDialog):
     es sofort angezeigt – ohne Brave-API-Call.
     """
     try:
-      item = self._current_mail_item()
+      item = self._current_mail_record()
       shop_name = str(item.get("shop_name", "") or "").strip()
       sender_domain = ""
       email = str(item.get("bestell_email", "") or "").strip()
@@ -3291,7 +3296,7 @@ class ScraperReviewWizardDialog(QDialog):
     try:
       payload = self._collect_current_payload()
     except Exception:
-      payload = dict(self.data_list[self.current_index]) if self.data_list else {}
+      payload = dict(self._current_mail_record())
     bestellnummer = self._safe_text(payload.get("bestellnummer", "")).strip()
     if not bestellnummer:
       self._current_order_review_bundle = None
@@ -3546,8 +3551,7 @@ class ScraperReviewWizardDialog(QDialog):
         payload["rechnung_vorhanden"] = True
         if self._current_rechnung_pdf_path:
           payload["rechnung_pdf_pfad"] = self._current_rechnung_pdf_path
-      if self._has_current_mail():
-        self.data_list[self.current_index] = payload
+      self._set_current_mail_data(payload)
 
       def _on_order_number_changed(new_no):
         if "bestellnummer" in self.inputs:
@@ -3729,7 +3733,7 @@ class ScraperReviewWizardDialog(QDialog):
       self._cleanup_mail_assets(item)
 
   def _advance_to_next(self):
-    current_item = self.data_list[self.current_index] if self._has_current_mail() else None
+    current_item = self._current_mail_record() or None
     self._close_preview_dialogs()
     self._cleanup_mail_assets(current_item)
     # Naechste pending Mail suchen
