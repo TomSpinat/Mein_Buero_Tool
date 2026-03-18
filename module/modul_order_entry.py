@@ -921,8 +921,53 @@ class OrderEntryApp(QWidget):
         """Slot fuer EinkaufHeadFormWidget.logoSearchRequested – delegiert an _start_logo_search()."""
         self._start_logo_search()
 
+    # ── EAN-Lookup: Einkauf (EinkaufItemsTableWidget) ──────────────────
+
+    def _on_einkauf_items_ean_lookup(self, context):
+        """Signal-Handler: EAN-Suche aus EinkaufItemsTableWidget heraus (delegiert an shared workflow)."""
+        ctx = dict(context or {})
+        worker = create_ean_lookup_worker(
+            parent_widget=self,
+            settings_manager=self.settings_manager,
+            context=ctx,
+            current_worker=self.ean_lookup_worker,
+            ean_button=self.einkauf_items_widget.btn_ean_lookup,
+            on_finished_callback=self._on_einkauf_ean_finished,
+            on_error_callback=self._on_einkauf_ean_error,
+        )
+        if worker is not None:
+            self._pending_ean_lookup_context = ctx
+            self.ean_lookup_worker = worker
+
+    def _on_einkauf_ean_finished(self, payload):
+        """Einkauf-Pfad: EAN-Ergebnis ueber shared workflow verarbeiten."""
+        context = dict(self._pending_ean_lookup_context or {})
+        self._pending_ean_lookup_context = None
+        reset_ean_lookup_button(self.einkauf_items_widget.btn_ean_lookup)
+        self.ean_lookup_worker = None
+
+        def _write_ean(row, ean):
+            self.einkauf_items_widget.set_ean_for_row(row, ean)
+
+        handle_ean_lookup_result(
+            parent_widget=self,
+            payload=payload,
+            context=context,
+            ean_service=self.ean_service,
+            on_ean_selected=_write_ean,
+        )
+
+    def _on_einkauf_ean_error(self, err_msg):
+        """Einkauf-Pfad: EAN-Fehler anzeigen."""
+        self._pending_ean_lookup_context = None
+        reset_ean_lookup_button(self.einkauf_items_widget.btn_ean_lookup)
+        self.ean_lookup_worker = None
+        handle_ean_lookup_error(parent_widget=self, err_msg=err_msg)
+
+    # ── EAN-Lookup: Verkauf (Legacy QTableWidget) ────────────────────
+
     def _lookup_ean_for_selected_row(self):
-        """Verkauf-Modus: EAN-Suche ueber Legacy-Tabelle. Einkauf nutzt EinkaufItemsTableWidget-Signal."""
+        """Verkauf-Modus: EAN-Suche ueber Legacy-Tabelle."""
         if self.ean_lookup_worker is not None and self.ean_lookup_worker.isRunning():
             CustomMsgBox.information(self, "EAN Suche", "Es laeuft bereits eine EAN-Suche im Hintergrund.")
             return
@@ -961,39 +1006,17 @@ class OrderEntryApp(QWidget):
             limit=25,
             allow_api_fallback=True,
         )
-        self.ean_lookup_worker.result_signal.connect(self._on_ean_lookup_finished)
-        self.ean_lookup_worker.error_signal.connect(self._on_ean_lookup_error)
+        self.ean_lookup_worker.result_signal.connect(self._on_verkauf_ean_finished)
+        self.ean_lookup_worker.error_signal.connect(self._on_verkauf_ean_error)
         self.ean_lookup_worker.start()
 
-    def _finish_ean_lookup_ui(self):
-        reset_ean_lookup_button(self.btn_ean_lookup)
-        if hasattr(self, "einkauf_items_widget"):
-            reset_ean_lookup_button(self.einkauf_items_widget.btn_ean_lookup)
-        self.ean_lookup_worker = None
-
-    def _on_ean_lookup_finished(self, payload):
+    def _on_verkauf_ean_finished(self, payload):
+        """Verkauf-Pfad: EAN-Ergebnis in Legacy-QTableWidget schreiben."""
         context = dict(self._pending_ean_lookup_context or {})
         self._pending_ean_lookup_context = None
-        self._finish_ean_lookup_ui()
+        reset_ean_lookup_button(self.btn_ean_lookup)
+        self.ean_lookup_worker = None
 
-        if context.get("_via_einkauf_widget"):
-            # Einkauf-Pfad: komplett ueber shared workflow
-            def _write_ean(row, ean):
-                self.einkauf_items_widget.set_ean_for_row(row, ean)
-
-            handle_ean_lookup_result(
-                parent_widget=self,
-                payload=payload,
-                context=context,
-                ean_service=self.ean_service,
-                on_ean_selected=_write_ean,
-            )
-        else:
-            # Verkauf-Pfad: Legacy-Tabelle (bleibt modul-spezifisch)
-            self._handle_verkauf_ean_result(payload, context)
-
-    def _handle_verkauf_ean_result(self, payload, context):
-        """Verkauf-spezifischer EAN-Ergebnis-Handler (Legacy-QTableWidget)."""
         candidates = payload.get("candidates", []) if isinstance(payload, dict) else []
         error_payload = payload.get("error", {}) if isinstance(payload, dict) else {}
         if not candidates:
@@ -1035,29 +1058,14 @@ class OrderEntryApp(QWidget):
             varianten_info=str(context.get("varianten_info", "")).strip(),
         )
 
-    def _on_ean_lookup_error(self, err_msg):
+    def _on_verkauf_ean_error(self, err_msg):
+        """Verkauf-Pfad: EAN-Fehler anzeigen."""
         self._pending_ean_lookup_context = None
-        self._finish_ean_lookup_ui()
+        reset_ean_lookup_button(self.btn_ean_lookup)
+        self.ean_lookup_worker = None
         handle_ean_lookup_error(parent_widget=self, err_msg=err_msg)
 
-    # ── EinkaufItemsTableWidget Signal-Handler ───────────────────────
-
-    def _on_einkauf_items_ean_lookup(self, context):
-        """Signal-Handler: EAN-Suche aus EinkaufItemsTableWidget heraus (delegiert an shared workflow)."""
-        ctx = dict(context or {})
-        ctx["_via_einkauf_widget"] = True
-        worker = create_ean_lookup_worker(
-            parent_widget=self,
-            settings_manager=self.settings_manager,
-            context=ctx,
-            current_worker=self.ean_lookup_worker,
-            ean_button=self.einkauf_items_widget.btn_ean_lookup,
-            on_finished_callback=self._on_ean_lookup_finished,
-            on_error_callback=self._on_ean_lookup_error,
-        )
-        if worker is not None:
-            self._pending_ean_lookup_context = ctx
-            self.ean_lookup_worker = worker
+    # ── Produktbild-Suche: Einkauf (EinkaufItemsTableWidget) ────────────
 
     def _on_einkauf_items_image_search(self, context):
         """Signal-Handler: Produktbild-Suche aus EinkaufItemsTableWidget heraus."""
@@ -1085,7 +1093,6 @@ class OrderEntryApp(QWidget):
             "produkt_name": produkt_name,
             "varianten_info": varianten_info,
             "ean": ean,
-            "_via_einkauf_widget": True,
         }
 
         self.product_image_search_worker = ProductImageSearchWorker(
