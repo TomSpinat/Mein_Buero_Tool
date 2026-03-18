@@ -3549,8 +3549,12 @@ class ScraperReviewWizardDialog(QDialog):
     except Exception as e:
       log_exception(__name__, e)
 
+  # ── Aktionen: Speichern / Ueberspringen / Verwerfen ─────────
+
   def _save_current_and_next(self):
+    """Speichert die aktuelle Mail und navigiert zur naechsten."""
     try:
+      # 1. Guard: Mapping muss abgeschlossen sein
       if not self._mapping_done_by_index.get(self.current_index, False):
         QMessageBox.information(
           self,
@@ -3560,73 +3564,34 @@ class ScraperReviewWizardDialog(QDialog):
         )
         return
 
-      payload = self._collect_current_payload()
-      item = self._current_mail_record()
-      payload["quelle"] = "mail_scraper"
-      payload["mail_uid"] = str(item.get("_mail_uid", "") or "").strip()
-      payload["mail_account"] = str(item.get("_mail_account", "") or "").strip()
-      if self.chk_rechnung_vorhanden.isChecked():
-        payload["rechnung_vorhanden"] = True
-        if self._current_rechnung_pdf_path:
-          payload["rechnung_pdf_pfad"] = self._current_rechnung_pdf_path
+      # 2. Payload zusammenstellen + zurueckschreiben
+      payload = self._build_save_payload()
       self._set_current_mail_data(payload)
 
-      def _on_order_number_changed(new_no):
-        if "bestellnummer" in self.inputs:
-          self.inputs["bestellnummer"].setText(self._safe_text(new_no))
-        payload["bestellnummer"] = self._safe_text(new_no)
-
-      review_bundle = self._refresh_order_review()
-      save_result = EinkaufPipeline.confirm_and_save_single(
-        self,
-        self.settings_manager,
-        payload,
-        on_order_number_changed=_on_order_number_changed,
-        show_new_number_info=True,
-        db=self._shared_db,
-        review_bundle=review_bundle,
-        skip_existing_review_dialog=True,
-      )
-      self._shared_db = save_result.get("db", self._shared_db)
-
+      # 3. Pipeline-Save ausfuehren
+      save_result = self._execute_pipeline_save(payload)
       if save_result.get("status") != "saved":
         return
 
-      image_result = self.einkauf_items_widget.apply_saved_image_decisions(
-        self._shared_db,
-        save_result.get("einkauf_id"),
-      )
-      if image_result.get("reason") == "error":
-        logging.warning("Bildentscheidungen aus Modul 2 konnten nicht angewendet werden: %s", image_result.get("message", ""))
-        QMessageBox.warning(
-          self,
-          "Bildpflege",
-          "Die Bestellung wurde gespeichert, aber die gemerkten Bildentscheidungen konnten noch nicht uebernommen werden."
-        )
+      # 4. Post-Save: Bilder + Pending Matches
+      self._apply_post_save_actions(save_result)
 
-      self.summary["saved"] += 1
-      self._mail_status[self.current_index] = "saved"
+      # 5. Finalisieren + weiter
+      self._finalize_current_mail("saved")
       if save_result.get("renamed"):
         self.summary["renamed"] += 1
-
-      match_result = EinkaufPipeline.confirm_and_apply_pending_matches(
-        self,
-        self.settings_manager,
-        db=self._shared_db
-      )
-      self._shared_db = match_result.get("db", self._shared_db)
-
-      self._advance_to_next()
+      self._cleanup_and_advance()
     except Exception as e:
       log_exception(__name__, e)
       QMessageBox.critical(self, "Speichern fehlgeschlagen", f"Fehler beim Speichern:\n{e}")
 
   def _skip_current(self):
-    self.summary["skipped"] += 1
-    self._mail_status[self.current_index] = "skipped"
-    self._advance_to_next()
+    """Ueberspringt die aktuelle Mail und navigiert zur naechsten."""
+    self._finalize_current_mail("skipped")
+    self._cleanup_and_advance()
 
   def _discard_current(self):
+    """Verwirft die aktuelle Mail nach Bestaetigung und navigiert zur naechsten."""
     reply = QMessageBox.question(
       self,
       "Mail verwerfen",
@@ -3637,9 +3602,95 @@ class ScraperReviewWizardDialog(QDialog):
     if reply != QMessageBox.StandardButton.Yes:
       return
 
-    self.summary["discarded"] += 1
-    self._mail_status[self.current_index] = "discarded"
-    self._advance_to_next()
+    self._finalize_current_mail("discarded")
+    self._cleanup_and_advance()
+
+  # ── Aktions-Helfer (intern) ────────────────────────────────────
+
+  def _finalize_current_mail(self, status):
+    """Setzt Status und Summary-Zaehler fuer die aktuelle Mail."""
+    self._mail_status[self.current_index] = status
+    if status in self.summary:
+      self.summary[status] += 1
+
+  def _build_save_payload(self):
+    """Baut den vollstaendigen Save-Payload fuer die aktuelle Mail."""
+    payload = self._collect_current_payload()
+    item = self._current_mail_record()
+    payload["quelle"] = "mail_scraper"
+    payload["mail_uid"] = str(item.get("_mail_uid", "") or "").strip()
+    payload["mail_account"] = str(item.get("_mail_account", "") or "").strip()
+    if self.chk_rechnung_vorhanden.isChecked():
+      payload["rechnung_vorhanden"] = True
+      if self._current_rechnung_pdf_path:
+        payload["rechnung_pdf_pfad"] = self._current_rechnung_pdf_path
+    return payload
+
+  def _execute_pipeline_save(self, payload):
+    """Fuehrt den Pipeline-Save mit Review-Bundle und Bestaetigungsdialog aus."""
+    def _on_order_number_changed(new_no):
+      if "bestellnummer" in self.inputs:
+        self.inputs["bestellnummer"].setText(self._safe_text(new_no))
+      payload["bestellnummer"] = self._safe_text(new_no)
+
+    review_bundle = self._refresh_order_review()
+    save_result = EinkaufPipeline.confirm_and_save_single(
+      self,
+      self.settings_manager,
+      payload,
+      on_order_number_changed=_on_order_number_changed,
+      show_new_number_info=True,
+      db=self._shared_db,
+      review_bundle=review_bundle,
+      skip_existing_review_dialog=True,
+    )
+    self._shared_db = save_result.get("db", self._shared_db)
+    return save_result
+
+  def _apply_post_save_actions(self, save_result):
+    """Wendet Bildentscheidungen und Pending-Matches nach erfolgreichem Save an."""
+    # Bildentscheidungen
+    image_result = self.einkauf_items_widget.apply_saved_image_decisions(
+      self._shared_db,
+      save_result.get("einkauf_id"),
+    )
+    if image_result.get("reason") == "error":
+      logging.warning("Bildentscheidungen aus Modul 2 konnten nicht angewendet werden: %s", image_result.get("message", ""))
+      QMessageBox.warning(
+        self,
+        "Bildpflege",
+        "Die Bestellung wurde gespeichert, aber die gemerkten Bildentscheidungen konnten noch nicht uebernommen werden."
+      )
+
+    # Pending Matches
+    match_result = EinkaufPipeline.confirm_and_apply_pending_matches(
+      self,
+      self.settings_manager,
+      db=self._shared_db
+    )
+    self._shared_db = match_result.get("db", self._shared_db)
+
+  def _find_next_pending_index(self):
+    """Sucht den naechsten 'pending' Index (vorwaerts, dann rueckwaerts). Gibt -1 zurueck wenn keiner."""
+    for idx in range(self.current_index + 1, len(self.data_list)):
+      if self._mail_status[idx] == "pending":
+        return idx
+    for idx in range(0, self.current_index):
+      if self._mail_status[idx] == "pending":
+        return idx
+    return -1
+
+  def _cleanup_and_advance(self):
+    """Raeumt aktuelle Mail auf und navigiert zur naechsten pending Mail."""
+    current_item = self._current_mail_record() or None
+    self._close_preview_dialogs()
+    self._cleanup_mail_assets(current_item)
+    next_idx = self._find_next_pending_index()
+    if next_idx < 0:
+      self.accept()
+      return
+    self.current_index = next_idx
+    self._load_current_mail()
 
   def _open_large_preview(self):
     item = self._current_mail_record()
@@ -3750,28 +3801,6 @@ class ScraperReviewWizardDialog(QDialog):
     for item in self.data_list:
       self._cleanup_mail_assets(item)
 
-  def _advance_to_next(self):
-    current_item = self._current_mail_record() or None
-    self._close_preview_dialogs()
-    self._cleanup_mail_assets(current_item)
-    # Naechste pending Mail suchen
-    next_idx = -1
-    for idx in range(self.current_index + 1, len(self.data_list)):
-      if self._mail_status[idx] == "pending":
-        next_idx = idx
-        break
-    # Falls keine nach current gefunden, auch davor suchen
-    if next_idx < 0:
-      for idx in range(0, self.current_index):
-        if self._mail_status[idx] == "pending":
-          next_idx = idx
-          break
-    if next_idx < 0:
-      # Alle verarbeitet
-      self.accept()
-      return
-    self.current_index = next_idx
-    self._load_current_mail()
 
   def _on_cancel(self):
     reply = QMessageBox.question(
