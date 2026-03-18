@@ -47,6 +47,11 @@ from module.background_tasks import BackgroundTask
 from module.gemini_api import process_receipt_with_gemini
 from module.einkauf_pipeline import EinkaufPipeline
 from module.einkauf_ui import EinkaufHeadFormWidget, EinkaufItemsTableWidget, OrderReviewPanelWidget, SummenBannerWidget
+from module.shared_einkauf_review import (
+  populate_einkauf_widgets,
+  collect_einkauf_payload,
+  apply_einkauf_post_save,
+)
 from module.normalization_dialog import NormalizationPanel
 from module.amazon_country_dialog import AmazonCountryPanel
 from module.ean_service import EanService
@@ -2606,17 +2611,19 @@ class ScraperReviewWizardDialog(QDialog):
       return ""
     return str(value)
 
-  def _set_form_fields_from_payload(self, payload):
-    payload = payload if isinstance(payload, dict) else {}
-    self.einkauf_form_widget.set_payload(payload)
-
   def _apply_payload_to_current_mail(self, payload):
     merged = dict(self._current_mail_record())
     if isinstance(payload, dict):
       merged.update(payload)
     self._set_current_mail_data(merged)
-    self._set_form_fields_from_payload(merged)
-    self._populate_items_table(merged.get("waren", []), payload=merged)
+    populate_einkauf_widgets(
+      self.einkauf_form_widget,
+      self.einkauf_items_widget,
+      merged,
+      ean_callback=self.ean_service.find_best_local_ean_by_name,
+    )
+    gesamt = merged.get("gesamt_ekp_brutto") if isinstance(merged, dict) else None
+    self.summen_banner.update_from_items(merged.get("waren", []) or [], gesamt)
     self._refresh_order_review()
 
   def _clear_mapping_panel(self):
@@ -3001,15 +3008,6 @@ class ScraperReviewWizardDialog(QDialog):
     item["_allow_external_preview_once"] = True
     self._render_current_preview()
 
-  def _populate_items_table(self, waren, payload=None):
-    self.einkauf_items_widget.set_items(
-      waren,
-      ean_fill_callback=self.ean_service.find_best_local_ean_by_name,
-      payload=payload,
-    )
-    gesamt = (payload or {}).get("gesamt_ekp_brutto") if isinstance(payload, dict) else None
-    self.summen_banner.update_from_items(waren or [], gesamt)
-
   # ── Lifecycle: Aktivierung / Teardown ────────────────────────
 
   def _activate_mail(self, idx):
@@ -3359,10 +3357,11 @@ class ScraperReviewWizardDialog(QDialog):
       return None
 
   def _collect_current_payload(self):
-    base = dict(self._current_mail_record())
-    base = self.einkauf_form_widget.apply_to_payload(base)
-    base["waren"] = self.einkauf_items_widget.get_items()
-    return base
+    return collect_einkauf_payload(
+      self.einkauf_form_widget,
+      self.einkauf_items_widget,
+      self._current_mail_record(),
+    )
   def _lookup_ean_for_selected_row(self):
     """EAN-Suche fuer die selektierte Artikelzeile (delegiert an shared workflow)."""
     context = self.einkauf_items_widget.get_selected_context()
@@ -3666,26 +3665,21 @@ class ScraperReviewWizardDialog(QDialog):
 
   def _apply_post_save_actions(self, save_result):
     """Wendet Bildentscheidungen und Pending-Matches nach erfolgreichem Save an."""
-    # Bildentscheidungen
-    image_result = self.einkauf_items_widget.apply_saved_image_decisions(
-      self._shared_db,
-      save_result.get("einkauf_id"),
+    result = apply_einkauf_post_save(
+      self, self.settings_manager,
+      self.einkauf_items_widget, save_result,
+      db=self._shared_db,
     )
+    self._shared_db = result.get("db", self._shared_db)
+
+    # Mail-Scraper-spezifisch: Warnung bei Bildfehler
+    image_result = result.get("image_result", {})
     if image_result.get("reason") == "error":
-      logging.warning("Bildentscheidungen aus Modul 2 konnten nicht angewendet werden: %s", image_result.get("message", ""))
       QMessageBox.warning(
         self,
         "Bildpflege",
         "Die Bestellung wurde gespeichert, aber die gemerkten Bildentscheidungen konnten noch nicht uebernommen werden."
       )
-
-    # Pending Matches
-    match_result = EinkaufPipeline.confirm_and_apply_pending_matches(
-      self,
-      self.settings_manager,
-      db=self._shared_db
-    )
-    self._shared_db = match_result.get("db", self._shared_db)
 
   def _find_next_pending_index(self):
     """Sucht den naechsten 'pending' Index (vorwaerts, dann rueckwaerts). Gibt -1 zurueck wenn keiner."""

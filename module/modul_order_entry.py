@@ -34,6 +34,11 @@ from module.product_image_search_worker import ProductImageSearchWorker
 from module.media.media_grid_selection_dialog import MediaGridSelectionDialog
 from module.media.media_service import MediaService
 
+from module.shared_einkauf_review import (
+    populate_einkauf_widgets,
+    collect_einkauf_payload,
+    apply_einkauf_post_save,
+)
 from module.shared_search_workflows import (
     create_logo_search_worker,
     reset_logo_search_button,
@@ -691,7 +696,12 @@ class OrderEntryApp(QWidget):
 
     def _fill_einkauf_ui(self):
         """Einkauf-Pfad: Kopfdaten + Artikel ueber EinkaufHeadFormWidget / EinkaufItemsTableWidget befuellen."""
-        self.einkauf_form_widget.set_payload(self.current_gemini_data)
+        populate_einkauf_widgets(
+            self.einkauf_form_widget,
+            self.einkauf_items_widget,
+            self.current_gemini_data,
+            ean_callback=self.ean_service.find_best_local_ean_by_name,
+        )
 
         # Inline-Suggestions fuer unbekannte Felder (statt modale Dialoge)
         field_suggestions = self.current_gemini_data.get("_field_suggestions", {})
@@ -700,12 +710,6 @@ class OrderEntryApp(QWidget):
                 widget = self.inputs.get(field_key)
                 if widget and hasattr(widget, "set_suggestion_dropdown") and suggestions:
                     widget.set_suggestion_dropdown(suggestions)
-
-        self.einkauf_items_widget.set_items(
-            self.current_gemini_data.get("waren", []),
-            ean_fill_callback=self.ean_service.find_best_local_ean_by_name,
-            payload=self.current_gemini_data,
-        )
 
     def _fill_verkauf_ui(self):
         """Verkauf-Pfad (Legacy): Kopfdaten aus QLineEdits, Artikel aus QTableWidget befuellen."""
@@ -1355,18 +1359,21 @@ class OrderEntryApp(QWidget):
 
     def _save_einkauf(self):
         """Einkauf-Pfad: Payload aus Widgets aufbauen, Pipeline-Save, Bild-Decisions, Matching."""
-        # Kopfdaten aus EinkaufHeadFormWidget uebernehmen
-        self.current_gemini_data = self.einkauf_form_widget.apply_to_payload(self.current_gemini_data)
+        # Payload aus Widgets sammeln
+        self.current_gemini_data = collect_einkauf_payload(
+            self.einkauf_form_widget,
+            self.einkauf_items_widget,
+            self.current_gemini_data,
+        )
 
-        # Waren aus EinkaufItemsTableWidget auslesen + validieren
-        waren_liste = self.einkauf_items_widget.get_items()
+        # Waren validieren
+        waren_liste = self.current_gemini_data.get("waren", [])
         if not waren_liste:
             CustomMsgBox.warning(self, "Validierung", "Keine Artikel vorhanden. Bitte mindestens eine Position hinzufuegen.")
             return
         if not any(str(it.get("produkt_name", "")).strip() for it in waren_liste):
             CustomMsgBox.warning(self, "Validierung", "Mindestens eine Position muss einen Produktnamen haben.")
             return
-        self.current_gemini_data["waren"] = waren_liste
 
         def _on_order_number_changed(new_no):
             self.current_gemini_data["bestellnummer"] = new_no
@@ -1389,16 +1396,9 @@ class OrderEntryApp(QWidget):
             if save_result.get("status") != "saved":
                 return
 
-            # Gemerkte Bildentscheidungen aus dem EinkaufItemsTableWidget anwenden
-            einkauf_id = save_result.get("einkauf_id")
-            save_db = save_result.get("db")
-            if einkauf_id and save_db:
-                self.einkauf_items_widget.apply_saved_image_decisions(save_db, einkauf_id)
-
-            EinkaufPipeline.confirm_and_apply_pending_matches(
-                self,
-                self.settings_manager,
-                db=save_db,
+            apply_einkauf_post_save(
+                self, self.settings_manager,
+                self.einkauf_items_widget, save_result,
             )
             self._reset_form()
         except Exception as e:
