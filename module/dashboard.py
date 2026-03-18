@@ -258,9 +258,10 @@ class DashboardWindow(QMainWindow):
     # Navigation
     # ------------------------------------------------------------------
 
-    def _handle_todo_action(self, action_str):
-        if action_str == "open_scanner":
-            self.open_scanner()
+    def _handle_todo_action(self, action_str: str) -> None:
+        """Reagiert auf Klick-Aktionen aus dem ToDo-Widget."""
+        if action_str == "open_input_scan":
+            self.open_input(InputApp.TAB_SCAN)
         elif action_str == "open_inbound":
             self.open_inbound()
         elif action_str == "open_packstation":
@@ -277,12 +278,16 @@ class DashboardWindow(QMainWindow):
         self.title_lbl.setText("INPUT")
         self.btn_back.show()
 
+    # ── Public-API-Wrapper (Abwaertskompatibilitaet) ─────────────
+    # Werden intern nicht mehr aufgerufen – bleiben als stabile
+    # oeffentliche Schnittstelle fuer externe Aufrufer erhalten.
+
     def open_scanner(self):
-        """Abwaertskompatibilitaet: Oeffnet Input-Modul auf Beleg-Scan-Tab."""
+        """[Compat] Oeffnet Input-Modul auf Beleg-Scan-Tab."""
         self.open_input(tab=InputApp.TAB_SCAN)
 
     def open_mail_scraper(self):
-        """Abwaertskompatibilitaet: Oeffnet Input-Modul auf E-Mail-Tab."""
+        """[Compat] Oeffnet Input-Modul auf E-Mail-Tab."""
         self.open_input(tab=InputApp.TAB_MAIL)
 
     def open_tracker(self):

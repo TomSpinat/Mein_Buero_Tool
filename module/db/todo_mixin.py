@@ -37,7 +37,7 @@ class TodoMixin:
                         "title": "EAN fehlt! (Stammdaten)",
                         "desc": f"'{item.get('produkt_name')}'{count_text} (Bestellung: {item.get('bestellnummer')}) benoetigt einen Barcode.",
                         "type": "warning",
-                        "action": "open_scanner",
+                        "action": "open_input_scan",
                     }
                 )
 
