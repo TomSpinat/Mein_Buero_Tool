@@ -22,9 +22,15 @@ from module.order_change_review import build_source_meta_from_payload, format_ch
 
 class EinkaufPipeline:
     @staticmethod
-    def prepare_mapping_workflow(result_dict):
+    def prepare_mapping_workflow(result_dict, *, include_suggestions=False):
         """
         Ermittelt die fachlich noetigen Mapping-Schritte.
+
+        Parameter:
+            result_dict:         KI-Ergebnis-Dict
+            include_suggestions: Wenn True, werden fuer offene Tasks
+                                 Inline-Vorschlaege aus mapping.json / Amazon-Optionen
+                                 mitgeliefert (fuer Inline-Dropdowns statt Dialoge).
 
         Rueckgabe:
         {
@@ -37,7 +43,9 @@ class EinkaufPipeline:
                "label": str,
                "raw_value": str,
              }
-          ]
+          ],
+          "auto_mapped": dict,  # Felder, die automatisch aufgeloest wurden
+          "suggestions": dict   # nur bei include_suggestions=True, sonst {}
         }
         """
         payload = dict(result_dict or {})
@@ -100,7 +108,37 @@ class EinkaufPipeline:
 
         if auto_mapped:
             payload["_auto_mapped_fields"] = auto_mapped
-        return {"payload": payload, "tasks": tasks}
+
+        # Suggestions bauen, falls angefragt
+        suggestions = {}
+        if include_suggestions and tasks:
+            from module.amazon_country_dialog import AMAZON_OPTIONS
+            from module.normalization_dialog import load_mapping
+
+            mapping_data = load_mapping()
+            for task in tasks:
+                task_type = str(task.get("task_type", "") or "").strip()
+                field = str(task.get("field", "") or "").strip()
+                category = str(task.get("category", "") or "").strip()
+
+                if task_type == "amazon_country":
+                    suggestions[field] = [
+                        label for label, _flag in AMAZON_OPTIONS
+                        if label != "Anderer Amazon Shop"
+                    ]
+                elif task_type == "normalization":
+                    known_mappings = mapping_data.get(category, {}) or {}
+                    standard_values = sorted(
+                        set(str(v) for v in known_mappings.values() if v)
+                    )
+                    suggestions[field] = standard_values
+
+        return {
+            "payload": payload,
+            "tasks": tasks,
+            "auto_mapped": auto_mapped,
+            "suggestions": suggestions,
+        }
 
     @staticmethod
     def apply_mapping_decision(payload, task, selected_value):
@@ -162,42 +200,17 @@ class EinkaufPipeline:
 
         Das aufrufende UI zeigt dann Inline-Dropdowns statt modaler Pop-ups.
         """
-        from module.amazon_country_dialog import AMAZON_OPTIONS, is_generic_amazon_shop
-        from module.normalization_dialog import load_mapping
-
         if not isinstance(result_dict, dict):
             return result_dict
 
-        workflow = EinkaufPipeline.prepare_mapping_workflow(result_dict)
+        workflow = EinkaufPipeline.prepare_mapping_workflow(
+            result_dict, include_suggestions=True,
+        )
         payload = dict(workflow.get("payload", {}) or {})
-        tasks = list(workflow.get("tasks", []) or [])
+        suggestions = workflow.get("suggestions", {}) or {}
 
-        if not tasks:
-            return payload
-
-        suggestions = {}
-        mapping_data = load_mapping()
-
-        for task in tasks:
-            task_type = str(task.get("task_type", "") or "").strip()
-            field = str(task.get("field", "") or "").strip()
-            category = str(task.get("category", "") or "").strip()
-            raw_value = str(task.get("raw_value", "") or "").strip()
-
-            if task_type == "amazon_country":
-                # Amazon-Laender als Vorschlaege
-                suggestions[field] = [label for label, _flag in AMAZON_OPTIONS if label != "Anderer Amazon Shop"]
-            elif task_type == "normalization":
-                # Alle bekannten Standard-Werte dieser Kategorie als Vorschlaege
-                known_mappings = mapping_data.get(category, {}) or {}
-                standard_values = sorted(set(str(v) for v in known_mappings.values() if v))
-                if standard_values:
-                    suggestions[field] = standard_values
-                else:
-                    # Keine bekannten Werte → leere Liste, Feld bleibt editierbar
-                    suggestions[field] = []
-
-        payload["_field_suggestions"] = suggestions
+        if suggestions:
+            payload["_field_suggestions"] = suggestions
         return payload
 
     @staticmethod
