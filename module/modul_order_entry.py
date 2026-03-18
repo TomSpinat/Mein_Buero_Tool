@@ -47,7 +47,7 @@ from module.crash_logger import (
 from module.lookup_service import LookupService
 from module.lookup_results import FieldState, FieldType, LookupSource
 from module.field_lookup_binding import FieldLookupBinding, create_bindings
-from module.einkauf_ui import EinkaufHeadFormWidget, SummenBannerWidget, set_field_state
+from module.einkauf_ui import EinkaufHeadFormWidget, SummenBannerWidget, OrderReviewPanelWidget, set_field_state
 class GeminiWorker(QThread):
     finished_signal = pyqtSignal(dict)
     error_signal = pyqtSignal(str)
@@ -289,36 +289,64 @@ class OrderEntryApp(QWidget):
 
     def _build_right_side(self):
         right_layout = QVBoxLayout()
-        right_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(6)
 
-        self.lbl_form = QLabel("<h3>2. Kopfdaten (Einkauf)</h3>")
-        right_layout.addWidget(self.lbl_form)
+        # Nicht sichtbares Label fuer Legacy-Kompatibilitaet (_on_mode_changed setText)
+        self.lbl_form = QLabel()
+        self.lbl_form.setVisible(False)
 
-        # --- EinkaufHeadFormWidget fuer Einkauf-Modus (InlineChangeFieldRow, Split-View) ---
+        # ── Tab-Widget ─────────────────────────────────────────────────────────
+        self.data_tabs = QTabWidget()
+        self.data_tabs.setStyleSheet(
+            "QTabWidget::pane { border: 1px solid #414868; border-radius: 6px; background: transparent; }"
+            "QTabBar::tab { background: #1a1b26; color: #a9b1d6; padding: 8px 18px; border: 1px solid #414868;"
+            " border-bottom: none; border-top-left-radius: 6px; border-top-right-radius: 6px; margin-right: 2px; }"
+            "QTabBar::tab:selected { background: #1f2335; color: #7aa2f7; font-weight: bold; }"
+            "QTabBar::tab:hover { background: #292e42; }"
+        )
+
+        # --- Tab 1: Kopfdaten ---
+        kopf_scroll = QScrollArea()
+        kopf_scroll.setWidgetResizable(True)
+        kopf_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        kopf_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        kopf_panel = QWidget()
+        kopf_box = QVBoxLayout(kopf_panel)
+        kopf_box.setContentsMargins(0, 8, 8, 0)
+        kopf_box.setSpacing(8)
+
         self.einkauf_form_widget = EinkaufHeadFormWidget(self, logo_search_mode="direct")
         self.einkauf_form_widget.logoSearchRequested.connect(self._start_logo_search_from_context)
+        self.einkauf_form_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
 
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setWidget(self.einkauf_form_widget)
-        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
-        scroll_area.setMaximumHeight(420)
-        self._einkauf_form_scroll = scroll_area
-        right_layout.addWidget(self._einkauf_form_scroll)
+        self._einkauf_form_scroll = QScrollArea()
+        self._einkauf_form_scroll.setWidgetResizable(True)
+        self._einkauf_form_scroll.setWidget(self.einkauf_form_widget)
+        self._einkauf_form_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._einkauf_form_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        kopf_box.addWidget(self._einkauf_form_scroll)
 
-        # --- Legacy QFormLayout-Container fuer Verkauf-Modus ---
+        # Legacy QFormLayout fuer Verkauf-Modus
         self.form_layout_frame = QWidget()
         _ff_layout = QVBoxLayout(self.form_layout_frame)
         _ff_layout.setContentsMargins(0, 0, 0, 0)
         self.form_layout = QFormLayout()
         _ff_layout.addLayout(self.form_layout)
         self.form_layout_frame.setVisible(False)
-        right_layout.addWidget(self.form_layout_frame)
+        kopf_box.addWidget(self.form_layout_frame)
 
-        # Tabelle für Warenpositionen (Einkauf oder Verkauf)
+        kopf_box.addStretch(1)
+        kopf_scroll.setWidget(kopf_panel)
+        self.data_tabs.addTab(kopf_scroll, "Kopfdaten")
+
+        # --- Tab 2: Artikel ---
+        artikel_panel = QWidget()
+        artikel_box = QVBoxLayout(artikel_panel)
+        artikel_box.setContentsMargins(0, 8, 8, 0)
+        artikel_box.setSpacing(8)
+
         waren_header_row = QHBoxLayout()
-        lbl_waren = QLabel("<h3>3. Erfasste Artikel</h3>")
-        waren_header_row.addWidget(lbl_waren)
         waren_header_row.addStretch()
 
         self.btn_add_row = QPushButton("+ Zeile")
@@ -340,16 +368,14 @@ class OrderEntryApp(QWidget):
         )
         self.btn_delete_row.clicked.connect(self._delete_selected_rows)
         waren_header_row.addWidget(self.btn_delete_row)
-
-        right_layout.addLayout(waren_header_row)
+        artikel_box.addLayout(waren_header_row)
 
         self.table_waren = QTableWidget()
-        self.table_waren.setColumnCount(7) # Bild + Produkt + Variante + EAN + Menge + Preis + Suchen
-        # Erlaube dem Nutzer die Spaltenbreite manuell anzupassen
+        self.table_waren.setColumnCount(7)
         self.table_waren.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.table_waren.horizontalHeader().setStretchLastSection(True) # Die letzte Spalte füllt den Rest auf
-        self.table_waren.verticalHeader().setDefaultSectionSize(45) # Größer wegen dem QLineEdit Padding
-        right_layout.addWidget(self.table_waren)
+        self.table_waren.horizontalHeader().setStretchLastSection(True)
+        self.table_waren.verticalHeader().setDefaultSectionSize(45)
+        artikel_box.addWidget(self.table_waren, 1)
 
         ean_row = QHBoxLayout()
         self.btn_ean_lookup = QPushButton("EAN suchen (markierte Zeile)")
@@ -357,19 +383,71 @@ class OrderEntryApp(QWidget):
         self.btn_ean_lookup.clicked.connect(self._lookup_ean_for_selected_row)
         ean_row.addWidget(self.btn_ean_lookup)
         ean_row.addStretch()
-        right_layout.addLayout(ean_row)
+        artikel_box.addLayout(ean_row)
 
-        # Summen-Banner (berechnet vs. KI-Gesamtpreis) — shared widget
         self.summen_banner = SummenBannerWidget()
-        right_layout.addWidget(self.summen_banner)
+        artikel_box.addWidget(self.summen_banner)
 
-        # Tabellen-Aenderungen tracken fuer Live-Summe + Validierung
         self.table_waren.itemChanged.connect(self._on_waren_table_changed)
+        self.data_tabs.addTab(artikel_panel, "Artikel")
+
+        # --- Tab 3: Uebersicht ---
+        uebersicht_scroll = QScrollArea()
+        uebersicht_scroll.setWidgetResizable(True)
+        uebersicht_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        uebersicht_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        uebersicht_panel = QWidget()
+        uebersicht_box = QVBoxLayout(uebersicht_panel)
+        uebersicht_box.setContentsMargins(0, 8, 8, 0)
+        uebersicht_box.setSpacing(12)
+
+        self.order_review_widget = OrderReviewPanelWidget(self)
+        self.order_review_widget.setMinimumHeight(96)
+        uebersicht_box.addWidget(self.order_review_widget)
+
+        lbl_mapping_log = QLabel("Auto-Mapping")
+        lbl_mapping_log.setStyleSheet("font-size: 13px; font-weight: bold; color: #7aa2f7;")
+        uebersicht_box.addWidget(lbl_mapping_log)
+        self.lbl_auto_mapping_log = QLabel("Keine automatischen Mappings.")
+        self.lbl_auto_mapping_log.setWordWrap(True)
+        self.lbl_auto_mapping_log.setStyleSheet(
+            "font-size: 12px; color: #a9b1d6; background-color: #1f2335;"
+            " border: 1px solid #414868; border-radius: 6px; padding: 8px;"
+        )
+        uebersicht_box.addWidget(self.lbl_auto_mapping_log)
+
+        lbl_warnings_title = QLabel("Warnungen")
+        lbl_warnings_title.setStyleSheet("font-size: 13px; font-weight: bold; color: #f7c66f;")
+        uebersicht_box.addWidget(lbl_warnings_title)
+        self.lbl_warnings = QLabel("Keine Warnungen.")
+        self.lbl_warnings.setWordWrap(True)
+        self.lbl_warnings.setStyleSheet(
+            "font-size: 12px; color: #a9b1d6; background-color: #1f2335;"
+            " border: 1px solid #414868; border-radius: 6px; padding: 8px;"
+        )
+        uebersicht_box.addWidget(self.lbl_warnings)
+
+        lbl_validation_title = QLabel("Validierung")
+        lbl_validation_title.setStyleSheet("font-size: 13px; font-weight: bold; color: #9ece6a;")
+        uebersicht_box.addWidget(lbl_validation_title)
+        self.lbl_validation_checklist = QLabel("")
+        self.lbl_validation_checklist.setWordWrap(True)
+        self.lbl_validation_checklist.setStyleSheet(
+            "font-size: 12px; color: #c0caf5; background-color: #1f2335;"
+            " border: 1px solid #414868; border-radius: 6px; padding: 8px;"
+        )
+        uebersicht_box.addWidget(self.lbl_validation_checklist)
+
+        uebersicht_box.addStretch(1)
+        uebersicht_scroll.setWidget(uebersicht_panel)
+        self.data_tabs.addTab(uebersicht_scroll, "Uebersicht")
+
+        right_layout.addWidget(self.data_tabs, 1)
 
         # Initial die Tabelle und das Formular aufbauen
         self._build_dynamic_form()
 
-        # Buttons
+        # Footer-Buttons (ausserhalb der Tabs)
         button_layout = QHBoxLayout()
 
         self.btn_reset = QPushButton("🗑️ Formular leeren")
