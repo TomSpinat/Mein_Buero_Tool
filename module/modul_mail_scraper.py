@@ -53,7 +53,8 @@ from module.shared_einkauf_review import (
   apply_einkauf_post_save,
   set_einkauf_review_data,
   refresh_summen_banner,
-  check_warenwert_delta,
+  clear_einkauf_review_data,
+  collect_einkauf_warnings,
 )
 from module.normalization_dialog import NormalizationPanel
 from module.amazon_country_dialog import AmazonCountryPanel
@@ -3335,8 +3336,7 @@ class ScraperReviewWizardDialog(QDialog):
     bestellnummer = self._safe_text(payload.get("bestellnummer", "")).strip()
     if not bestellnummer:
       self._current_order_review_bundle = None
-      self.einkauf_form_widget.clear_review_data()
-      self.einkauf_items_widget.clear_review_data()
+      clear_einkauf_review_data(self.einkauf_form_widget, self.einkauf_items_widget)
       self.order_review_widget.clear_review("Noch keine Bestellnummer erkannt. Die Pruefung startet, sobald eine Nummer vorhanden ist.")
       return None
     try:
@@ -3352,8 +3352,7 @@ class ScraperReviewWizardDialog(QDialog):
       return bundle
     except Exception as e:
       log_exception(__name__, e)
-      self.einkauf_form_widget.clear_review_data()
-      self.einkauf_items_widget.clear_review_data()
+      clear_einkauf_review_data(self.einkauf_form_widget, self.einkauf_items_widget)
       self.order_review_widget.clear_review("Aenderungspruefung momentan nicht verfuegbar.")
       return None
 
@@ -3505,21 +3504,8 @@ class ScraperReviewWizardDialog(QDialog):
         self.lbl_auto_mapping_log.setText("Keine automatischen Mappings.")
 
       # Warnungen
-      warnings = []
-      # Preisdelta
       items_list = self.einkauf_items_widget.get_items()
-      delta_warn = check_warenwert_delta(items_list, item.get("gesamt_ekp_brutto", 0))
-      if delta_warn:
-        warnings.append(delta_warn)
-
-      # Fehlende Felder
-      for key, label in [("bestellnummer", "Bestellnummer"), ("shop_name", "Shop"), ("bestell_datum", "Bestelldatum")]:
-        widget = self.inputs.get(key)
-        if widget and not str(widget.text()).strip():
-          warnings.append(f"Feld \"{label}\" ist leer")
-
-      if not items_list:
-        warnings.append("Keine Artikelpositionen vorhanden")
+      warnings = collect_einkauf_warnings(self.einkauf_form_widget, items_list, item)
 
       self.lbl_warnings.setText("\n".join(warnings) if warnings else "Keine Warnungen.")
       self.lbl_warnings.setStyleSheet(

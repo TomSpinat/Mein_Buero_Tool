@@ -40,6 +40,7 @@ from module.shared_einkauf_review import (
     apply_einkauf_post_save,
     set_einkauf_review_data,
     refresh_summen_banner,
+    mark_pflichtfeld,
 )
 from module.shared_search_workflows import (
     create_logo_search_worker,
@@ -1240,19 +1241,10 @@ class OrderEntryApp(QWidget):
         """Einkauf-Pfad: Bestellnummer + mindestens 1 Position mit Produktname."""
         bestellnummer_widget = self.inputs.get("bestellnummer")
         bestellnummer = str(bestellnummer_widget.text()).strip() if bestellnummer_widget else ""
-
-        # Pflichtfeld-Markierung (auf das innere QLineEdit, nicht den aeusseren QWidget)
-        if bestellnummer_widget:
-            inner = getattr(bestellnummer_widget, "normal_input", bestellnummer_widget)
-            if not bestellnummer:
-                inner.setStyleSheet(
-                    "QLineEdit { border: 1px solid #f7768e; background-color: #2d1f2f; }"
-                )
-                inner.setToolTip("Pflichtfeld: Bestellnummer muss ausgefuellt sein")
-            else:
-                inner.setStyleSheet("")
-                inner.setToolTip("")
-
+        mark_pflichtfeld(
+            self.einkauf_form_widget, "bestellnummer", bool(bestellnummer),
+            "Pflichtfeld: Bestellnummer muss ausgefuellt sein",
+        )
         items = self.einkauf_items_widget.get_items()
         has_item = any(str(it.get("produkt_name", "")).strip() for it in items)
         return bool(bestellnummer) and has_item

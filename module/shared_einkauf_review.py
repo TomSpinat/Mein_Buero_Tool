@@ -5,7 +5,10 @@ zwischen beiden Modulen vereinheitlichen:
 - Widget-Population (Payload → EinkaufHeadFormWidget + EinkaufItemsTableWidget)
 - Payload-Collection (Widgets → Payload)
 - Post-Save-Aktionen (Bildentscheidungen + Pending Matches)
-- Review-Bundle-Verteilung (bundle → EinkaufHeadFormWidget + EinkaufItemsTableWidget)
+- Review-Bundle-Verteilung + -Bereinigung
+- Warenwert-Berechnung und Delta-Pruefung
+- Summen-Banner-Refresh
+- Validierung, Warnungen und Pflichtfeld-Markierung
 """
 
 import logging
@@ -116,6 +119,21 @@ def set_einkauf_review_data(form_widget, items_widget, bundle):
   items_widget.set_review_data(bundle)
 
 
+def clear_einkauf_review_data(form_widget, items_widget):
+  """Entfernt Review-Hervorhebungen von beiden Widgets.
+
+  Symmetrisches Gegenstueck zu set_einkauf_review_data().
+  Wird aufgerufen wenn kein Review-Bundle verfuegbar ist
+  (z.B. keine Bestellnummer oder Fehler beim Bundle-Aufbau).
+
+  Args:
+    form_widget: EinkaufHeadFormWidget-Instanz.
+    items_widget: EinkaufItemsTableWidget-Instanz.
+  """
+  form_widget.clear_review_data()
+  items_widget.clear_review_data()
+
+
 # ── Warenwert-Berechnung und Delta-Pruefung ──────────────────────────────────
 
 def compute_warenwert(items) -> float:
@@ -177,3 +195,106 @@ def refresh_summen_banner(banner_widget, items_widget, payload) -> None:
   items = items_widget.get_items()
   gesamt = (payload or {}).get("gesamt_ekp_brutto", 0) if isinstance(payload, dict) else 0
   banner_widget.update_from_items(items, gesamt)
+
+
+# ── Validierung und Warnungen ────────────────────────────────────────────────
+
+# Pflichtfelder, deren Fehlen in den Einkauf-Warnungen gemeldet wird.
+_EINKAUF_WARN_FIELDS = [
+    ("bestellnummer", "Bestellnummer"),
+    ("shop_name", "Shop"),
+    ("bestell_datum", "Bestelldatum"),
+]
+
+
+def _field_text(form_widget, key):
+  """Liest den Textinhalt eines Feldes aus EinkaufHeadFormWidget.inputs."""
+  w = form_widget.inputs.get(key)
+  return str(w.text()).strip() if w and hasattr(w, "text") else ""
+
+
+def validate_einkauf_waren(items):
+  """Validiert die Waren-Liste und gibt gefundene Probleme zurueck.
+
+  Prueft:
+  - Keine Artikelpositionen vorhanden
+  - Keine Position mit Produktname
+
+  Args:
+    items: Liste von Artikel-Dicts.
+
+  Returns:
+    list[str]: Leere Liste wenn alles OK, sonst Fehlertexte.
+  """
+  issues = []
+  if not items:
+    issues.append("Keine Artikelpositionen vorhanden")
+    return issues
+  if not any(str(it.get("produkt_name", "")).strip() for it in items):
+    issues.append("Mindestens eine Position muss einen Produktnamen haben")
+  return issues
+
+
+def collect_einkauf_warnings(form_widget, items, payload):
+  """Sammelt Standard-Einkauf-Review-Warnungen.
+
+  Prueft Preisdelta, fehlende Pflichtfelder und leere Artikelliste.
+  Die Warnungen werden in der Reihenfolge zurueckgegeben:
+  1. Preisabweichung (KI vs. berechneter Warenwert)
+  2. Fehlende Pflichtfelder (Bestellnummer, Shop, Bestelldatum)
+  3. Keine Artikelpositionen
+
+  Args:
+    form_widget: EinkaufHeadFormWidget-Instanz (fuer Pflichtfeld-Pruefung).
+    items: Liste von Artikel-Dicts (z.B. von items_widget.get_items()).
+    payload: Payload-Dict mit optionalem 'gesamt_ekp_brutto'.
+
+  Returns:
+    list[str]: Warnungstexte (leer wenn alles OK).
+  """
+  warnings = []
+
+  # Preisdelta
+  safe_payload = payload if isinstance(payload, dict) else {}
+  delta = check_warenwert_delta(items, safe_payload.get("gesamt_ekp_brutto", 0))
+  if delta:
+    warnings.append(delta)
+
+  # Fehlende Pflichtfelder
+  for key, label in _EINKAUF_WARN_FIELDS:
+    if not _field_text(form_widget, key):
+      warnings.append(f'Feld "{label}" ist leer')
+
+  # Artikelpositionen
+  if not items:
+    warnings.append("Keine Artikelpositionen vorhanden")
+
+  return warnings
+
+
+# ── Pflichtfeld-Markierung ───────────────────────────────────────────────────
+
+def mark_pflichtfeld(form_widget, field_key, is_valid, tooltip=None):
+  """Setzt oder entfernt die visuelle Pflichtfeld-Markierung auf einem Feld.
+
+  Markiert das innere QLineEdit des InlineChangeFieldRow rot (Border + Tooltip)
+  wenn is_valid False ist, raeumt die Markierung bei True auf.
+
+  Args:
+    form_widget: EinkaufHeadFormWidget-Instanz.
+    field_key: Schluessel des Feldes (z.B. 'bestellnummer').
+    is_valid: True = Feld gueltig (Markierung entfernen), False = markieren.
+    tooltip: Optionaler Tooltip-Text fuer ungueltige Felder.
+  """
+  widget = form_widget.inputs.get(field_key)
+  if not widget:
+    return
+  inner = getattr(widget, "normal_input", widget)
+  if not is_valid:
+    inner.setStyleSheet(
+      "QLineEdit { border: 1px solid #f7768e; background-color: #2d1f2f; }"
+    )
+    inner.setToolTip(tooltip or "Pflichtfeld muss ausgefuellt sein")
+  else:
+    inner.setStyleSheet("")
+    inner.setToolTip("")
