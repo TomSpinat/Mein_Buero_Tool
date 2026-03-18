@@ -3012,49 +3012,67 @@ class ScraperReviewWizardDialog(QDialog):
     self.summen_banner.update_from_items(waren or [], gesamt)
 
   def _load_current_mail(self):
-    item = self._current_mail_record()
-    self._set_progress_text()
+    """Laedt die aktuelle Mail und aktualisiert alle UI-Bereiche.
 
+    Phasen:
+      1. Payload vorbereiten + in Form/Items anwenden
+      2. Preview + Anhaenge rendern
+      3. Mapping-Panel fuer aktuelle Mail vorbereiten
+      4. Status-Badges aktualisieren
+      5. Navigation + Footer aktualisieren
+      6. Auto-Enrichment (Logo, Paketdienst)
+      7. Detail-Sektionen (Uebersicht, Rechnung)
+      8. Tab-Reset
+    """
+    self._prepare_current_mail_payload()
+    self._refresh_current_mail_preview()
+    self._refresh_current_mail_mapping_panel()
+    self._update_current_mail_badges()
+    self._refresh_current_mail_navigation()
+    self._auto_enrich_current_mail()
+    self._refresh_current_mail_detail_sections()
+    self.data_tabs.setCurrentIndex(0)
+
+  # ── Lade-Phasen (intern) ──────────────────────────────────────
+
+  def _prepare_current_mail_payload(self):
+    """Phase 1: Mapping-State sichern, Payload in Form + Items + Review anwenden."""
+    item = self._current_mail_record()
     state = self._ensure_mapping_state_for_index(self.current_index, rebuild=False, source_payload=item)
     self._apply_payload_to_current_mail(state.get("payload", {}))
-    item = self._current_mail_record()
 
+  def _refresh_current_mail_preview(self):
+    """Phase 2: Preview + Anhaenge rendern, passenden Preview-Tab waehlen."""
     self._update_current_mail_preview_and_attachments()
-    self._update_mapping_state_ui()
+    item = self._current_mail_record()
     if item.get("_primary_scan_source_type", "") == "mail_attachment" and self._pdf_attachment_rows(item):
       self.preview_tabs.setCurrentIndex(1)
     else:
       self.preview_tabs.setCurrentIndex(0)
 
-    if self._mapping_done_by_index.get(self.current_index, False):
-      self.mapping_frame.setVisible(False)
-      self._clear_mapping_panel()
-    else:
-      self.mapping_frame.setVisible(False)
-      self._clear_mapping_panel()
-
+  def _refresh_current_mail_mapping_panel(self):
+    """Phase 3: Mapping-Panel zuruecksetzen, Status-UI aktualisieren, Auto-Prompt starten."""
+    self.mapping_frame.setVisible(False)
+    self._clear_mapping_panel()
+    self._update_mapping_state_ui()
     idx = self.current_index
     QTimer.singleShot(0, lambda idx=idx: self._auto_prompt_mapping_for_index(idx))
 
-    # --- Duplikat-Pre-Check + Konfidenz + Absender ---
-    self._update_current_mail_badges()
-
-    # --- Navigationsleiste + Stats aktualisieren ---
+  def _refresh_current_mail_navigation(self):
+    """Phase 5: Progress-Text, Mail-Banner, Nav-Dots, Footer-Stats aktualisieren."""
+    self._set_progress_text()
     self._update_nav_dots()
     self._update_footer_stats()
 
-    # --- LookupService: Logo aus DB laden bevor API aufgerufen wird ---
+  def _auto_enrich_current_mail(self):
+    """Phase 6: Auto-Lookups fuer Logo und Paketdienst ausfuehren."""
     self._auto_lookup_shop_logo_from_db()
-
-    # --- Paketdienst Auto-Detect ---
     self._auto_detect_paketdienst()
 
-    # --- Uebersicht-Tab + Rechnungs-Sektion aktualisieren ---
+  def _refresh_current_mail_detail_sections(self):
+    """Phase 7: Uebersicht-Tab und Rechnungs-Sektion aktualisieren."""
     self._update_uebersicht_tab()
     self._update_rechnung_section()
-
-    # --- Tab auf Kopfdaten zuruecksetzen ---
-    self.data_tabs.setCurrentIndex(0)
 
   _CARRIER_PATTERNS = {
     "dhl": "DHL", "dpd": "DPD", "gls": "GLS",
