@@ -37,6 +37,12 @@ from module.media.media_keys import build_shop_key, build_product_key
 from module.media.media_service import MediaService
 
 from module.ui_media_pixmap import create_placeholder_pixmap, render_preview_pixmap
+from module.shared_search_workflows import (
+    create_logo_search_worker,
+    reset_logo_search_button,
+    handle_logo_search_result,
+    handle_logo_search_error,
+)
 
 from module.crash_logger import (
     AppError,
@@ -1048,100 +1054,51 @@ class OrderEntryApp(QWidget):
     # ── Shop-Logo-Suche (Google Custom Search API, 100 Gratis/Tag) ───
 
     def _start_logo_search(self):
-        if self.logo_search_worker is not None and self.logo_search_worker.isRunning():
-            CustomMsgBox.information(self, "Logo-Suche", "Es laeuft bereits eine Logo-Suche im Hintergrund.")
-            return
-
         shop_name = str(self.inputs.get("shop_name", QLineEdit()).text()).strip()
-        if not shop_name:
-            CustomMsgBox.information(self, "Logo-Suche", "Bitte zuerst einen Shop-Namen eintragen.")
-            return
-
         sender_domain = ""
         bestell_email = str(self.inputs.get("bestell_email", QLineEdit()).text()).strip()
         if "@" in bestell_email:
             sender_domain = bestell_email.split("@", 1)[1].strip().lower()
 
-        self.btn_logo_search.setEnabled(False)
-        self.btn_logo_search.setText("Logo suchen...")
-
-        self.logo_search_worker = ShopLogoSearchWorker(
-            self.settings_manager,
-            canonical_shop_name=shop_name,
+        worker = create_logo_search_worker(
+            parent_widget=self,
+            settings_manager=self.settings_manager,
+            shop_name=shop_name,
             sender_domain=sender_domain,
-            limit=6,
+            current_worker=self.logo_search_worker,
+            logo_button=self.btn_logo_search,
+            on_finished_callback=self._on_logo_search_finished,
+            on_error_callback=self._on_logo_search_error,
         )
-        self.logo_search_worker.result_signal.connect(self._on_logo_search_finished)
-        self.logo_search_worker.error_signal.connect(self._on_logo_search_error)
-        self.logo_search_worker.start()
+        if worker is not None:
+            self.logo_search_worker = worker
 
     def _finish_logo_search_ui(self):
-        if hasattr(self, "einkauf_form_widget"):
-            self.einkauf_form_widget.btn_logo_search.setEnabled(True)
-            # Text basierend auf ob ein Logo bereits gespeichert ist
-            shop_name = str(self.inputs.get("shop_name", QLineEdit()).text()).strip()
-            self.einkauf_form_widget.btn_logo_search.setText("Logo suchen")
+        reset_logo_search_button(self.btn_logo_search)
         self.logo_search_worker = None
 
     def _on_logo_search_finished(self, result_dict):
-        candidates = result_dict.get("candidates", []) if isinstance(result_dict, dict) else []
         shop_name = str(self.inputs.get("shop_name", QLineEdit()).text()).strip()
         self._finish_logo_search_ui()
 
-        if not candidates:
-            CustomMsgBox.information(self, "Logo-Suche", "Es wurden keine passenden Logos gefunden.")
-            return
-
-        selected = MediaGridSelectionDialog.choose(
-            shop_name or "Shop-Logo",
-            candidates,
-            search_type="Logo",
-            parent=self,
-        )
-        if not selected:
-            return
-
-        image_url = str(selected.get("image_url", "") or selected.get("thumbnail_url", "") or "").strip()
-        if not image_url:
-            CustomMsgBox.warning(self, "Logo-Suche", "Der gewaehlte Eintrag hat keine gueltige Bild-URL.")
-            return
-
-        try:
-            db = DatabaseManager(self.settings_manager)
-            media_service = MediaService(db)
-            result = media_service.register_remote_shop_logo(
-                shop_name=shop_name,
-                image_url=image_url,
-                source_module="modul_order_entry",
-                source_kind="manual_web_selection",
-                source_ref=str(selected.get("source_page_url", "") or "").strip(),
-            )
-            # Logo-Vorschau aktualisieren
-            logo_path = ""
-            if isinstance(result, dict):
-                asset = result.get("asset") or {}
-                logo_path = str(asset.get("file_path", "") or "").strip()
-            if logo_path and hasattr(self, "einkauf_form_widget"):
-                # Pfad korrekt aufloesen (unabhaengig vom CWD)
-                from module.media.media_store import LocalMediaStore
-                abs_logo_path = LocalMediaStore().resolve_path(logo_path) if not os.path.isabs(logo_path) else logo_path
-                if abs_logo_path and os.path.exists(abs_logo_path):
-                    logo_path = abs_logo_path
-                # set_shop_logo_path macht das Frame sichtbar und setzt das Pixmap
-                self.einkauf_form_widget.set_shop_logo_path(logo_path)
-            CustomMsgBox.information(self, "Logo-Suche", f"Logo fuer '{shop_name}' wurde gespeichert.")
-            # Lookup neu starten damit auch Feld-State aktualisiert wird
+        def _on_logo_saved(saved_shop_name):
             binding = self._lookup_bindings.get("shop_name")
             if binding:
-                binding.trigger_lookup(shop_name)
-        except Exception as exc:
-            log_exception(__name__, exc)
-            CustomMsgBox.warning(self, "Logo-Suche", f"Das Logo konnte nicht gespeichert werden:\n{exc}")
+                binding.trigger_lookup(saved_shop_name)
+
+        handle_logo_search_result(
+            parent_widget=self,
+            settings_manager=self.settings_manager,
+            result_dict=result_dict,
+            shop_name=shop_name,
+            source_module="modul_order_entry",
+            form_widget=getattr(self, "einkauf_form_widget", None),
+            on_complete=_on_logo_saved,
+        )
 
     def _on_logo_search_error(self, err_msg):
         self._finish_logo_search_ui()
-        msg = str(err_msg or "").strip() or "Unbekannter Fehler bei der Logo-Suche."
-        CustomMsgBox.warning(self, "Logo-Suche", f"Die Logo-Suche ist fehlgeschlagen:\n{msg}")
+        handle_logo_search_error(parent_widget=self, err_msg=err_msg)
 
     # ── Produktbild-Suche (Google Custom Search API, 100 Gratis/Tag) ─
 
