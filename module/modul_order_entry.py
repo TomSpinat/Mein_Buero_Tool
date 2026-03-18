@@ -39,6 +39,7 @@ from module.shared_einkauf_review import (
     collect_einkauf_payload,
     apply_einkauf_post_save,
     set_einkauf_review_data,
+    refresh_summen_banner,
 )
 from module.shared_search_workflows import (
     create_logo_search_worker,
@@ -1226,14 +1227,7 @@ class OrderEntryApp(QWidget):
         if self.scan_mode != "einkauf":
             self.summen_banner.setVisible(False)
             return
-
-        items = self.einkauf_items_widget.get_items()
-        if not items:
-            self.summen_banner.setVisible(False)
-            return
-
-        ki_gesamt = self.current_gemini_data.get("gesamt_ekp_brutto", 0)
-        self.summen_banner.update_from_items(items, ki_gesamt)
+        refresh_summen_banner(self.summen_banner, self.einkauf_items_widget, self.current_gemini_data)
 
     def _update_save_button_state(self):
         """Aktiviert/deaktiviert den Save-Button basierend auf Pflichtfeld-Validierung."""

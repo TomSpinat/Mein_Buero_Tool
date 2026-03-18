@@ -52,6 +52,8 @@ from module.shared_einkauf_review import (
   collect_einkauf_payload,
   apply_einkauf_post_save,
   set_einkauf_review_data,
+  refresh_summen_banner,
+  check_warenwert_delta,
 )
 from module.normalization_dialog import NormalizationPanel
 from module.amazon_country_dialog import AmazonCountryPanel
@@ -2623,8 +2625,7 @@ class ScraperReviewWizardDialog(QDialog):
       merged,
       ean_callback=self.ean_service.find_best_local_ean_by_name,
     )
-    gesamt = merged.get("gesamt_ekp_brutto") if isinstance(merged, dict) else None
-    self.summen_banner.update_from_items(merged.get("waren", []) or [], gesamt)
+    refresh_summen_banner(self.summen_banner, self.einkauf_items_widget, merged)
     self._refresh_order_review()
 
   def _clear_mapping_panel(self):
@@ -3507,21 +3508,9 @@ class ScraperReviewWizardDialog(QDialog):
       warnings = []
       # Preisdelta
       items_list = self.einkauf_items_widget.get_items()
-      warenwert = 0.0
-      for art in items_list:
-        try:
-          m = float(str(art.get("menge", 1) or 1).replace(",", "."))
-          p = float(str(art.get("ekp_brutto", 0) or 0).replace(",", "."))
-          warenwert += m * p
-        except (ValueError, TypeError):
-          pass
-      ki_gesamt = 0.0
-      try:
-        ki_gesamt = float(str(item.get("gesamt_ekp_brutto", 0) or 0).replace(",", "."))
-      except (ValueError, TypeError):
-        pass
-      if ki_gesamt > 0 and abs(warenwert - ki_gesamt) > 0.02:
-        warnings.append(f"Preisabweichung: Berechnet {warenwert:.2f} EUR vs. KI {ki_gesamt:.2f} EUR")
+      delta_warn = check_warenwert_delta(items_list, item.get("gesamt_ekp_brutto", 0))
+      if delta_warn:
+        warnings.append(delta_warn)
 
       # Fehlende Felder
       for key, label in [("bestellnummer", "Bestellnummer"), ("shop_name", "Shop"), ("bestell_datum", "Bestelldatum")]:

@@ -114,3 +114,66 @@ def set_einkauf_review_data(form_widget, items_widget, bundle):
   """
   form_widget.set_review_data(bundle)
   items_widget.set_review_data(bundle)
+
+
+# ── Warenwert-Berechnung und Delta-Pruefung ──────────────────────────────────
+
+def compute_warenwert(items) -> float:
+  """Berechnet den Warenwert (Summe Menge * EKP-Brutto) aus einer Artikelliste.
+
+  Identischer Algorithmus wie SummenBannerWidget.update_from_items(),
+  aber als freie Funktion ohne Widget-Abhaengigkeit (Circular-Dep-frei).
+
+  Args:
+    items: Liste von Artikel-Dicts mit 'menge' und 'ekp_brutto'.
+
+  Returns:
+    float: Berechneter Warenwert in EUR.
+  """
+  warenwert = 0.0
+  for item in (items or []):
+    try:
+      m = float(str(item.get("menge", 1) or 1).replace(",", "."))
+      p = float(str(item.get("ekp_brutto", 0) or 0).replace(",", "."))
+      warenwert += m * p
+    except (ValueError, TypeError):
+      pass
+  return warenwert
+
+
+def check_warenwert_delta(items, gesamt_ekp_brutto) -> str | None:
+  """Prueft ob die Summe der Einzelpreise vom KI-Gesamtpreis abweicht.
+
+  Args:
+    items: Liste von Artikel-Dicts mit 'menge' und 'ekp_brutto'.
+    gesamt_ekp_brutto: KI-ermittelter Gesamtpreis (str oder float).
+
+  Returns:
+    str: Warnungstext wenn Abweichung > 0.02 EUR, sonst None.
+  """
+  warenwert = compute_warenwert(items)
+  try:
+    ki_gesamt = float(str(gesamt_ekp_brutto or 0).replace(",", "."))
+  except (ValueError, TypeError):
+    ki_gesamt = 0.0
+  if ki_gesamt > 0 and abs(warenwert - ki_gesamt) > 0.02:
+    return f"Preisabweichung: Berechnet {warenwert:.2f} EUR vs. KI {ki_gesamt:.2f} EUR"
+  return None
+
+
+# ── Summen-Banner aktualisieren ──────────────────────────────────────────────
+
+def refresh_summen_banner(banner_widget, items_widget, payload) -> None:
+  """Aktualisiert das Summen-Banner aus Items-Widget und Payload.
+
+  Kapselt den wiederkehrenden Post-Populate-Aufruf nach populate_einkauf_widgets().
+  SummenBannerWidget.update_from_items() verwaltet setVisible(True/False) selbst.
+
+  Args:
+    banner_widget: SummenBannerWidget-Instanz.
+    items_widget:  EinkaufItemsTableWidget-Instanz.
+    payload:       Payload-Dict mit optionalem 'gesamt_ekp_brutto'.
+  """
+  items = items_widget.get_items()
+  gesamt = (payload or {}).get("gesamt_ekp_brutto", 0) if isinstance(payload, dict) else 0
+  banner_widget.update_from_items(items, gesamt)
