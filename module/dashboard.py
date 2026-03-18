@@ -16,8 +16,7 @@ from PyQt6.QtCore import Qt, QSize
 from module.settings_dialog import SettingsDialog
 from config import resource_path, SettingsManager
 from module.style_manager import StyleManager
-from module.modul_order_entry import OrderEntryApp
-from module.modul_mail_scraper import MailScraperApp
+from module.modul_input import InputApp
 from module.modul_tracker import TrackerApp
 from module.modul_wareneingang import WareneingangApp
 from module.modul_packstation import PackstationApp
@@ -186,19 +185,17 @@ class DashboardWindow(QMainWindow):
 
         apps_layout = QGridLayout()
         apps_layout.addWidget(
-            make_tile("btn_scanner",     "assets/icons/dash_order_entry.png",  "Auftrags\nErfassung",  self.open_scanner),     0, 0)
+            make_tile("btn_input",       "assets/icons/dash_order_entry.png",  "Input",                 self.open_input),        0, 0)
         apps_layout.addWidget(
-            make_tile("btn_mail",        "assets/icons/dash_mail_scraper.png", "Mail\nScraper",         self.open_mail_scraper), 0, 1)
+            make_tile("btn_tracker",     "assets/icons/dash_tracker.png",      "Tracking\nRadar",       self.open_tracker),      0, 1)
         apps_layout.addWidget(
-            make_tile("btn_tracker",     "assets/icons/dash_tracker.png",      "Tracking\nRadar",       self.open_tracker),      0, 2)
+            make_tile("btn_inbound",     "assets/icons/dash_inbound.png",      "Waren-\neingang",       self.open_inbound),      0, 2)
         apps_layout.addWidget(
-            make_tile("btn_inbound",     "assets/icons/dash_inbound.png",      "Waren-\neingang",       self.open_inbound),      1, 0)
+            make_tile("btn_packstation", "assets/icons/dash_packstation.png",  "Packstation\nOutbound", self.open_packstation),  1, 0)
         apps_layout.addWidget(
-            make_tile("btn_packstation", "assets/icons/dash_packstation.png",  "Packstation\nOutbound", self.open_packstation),  1, 1)
+            make_tile("btn_finances",    "assets/icons/dash_finances.png",     "Finanz-\nUebersicht",   self.open_finances),     1, 1)
         apps_layout.addWidget(
-            make_tile("btn_finances",    "assets/icons/dash_finances.png",     "Finanz-\nUebersicht",   self.open_finances),     1, 2)
-        apps_layout.addWidget(
-            make_tile("btn_poms",        "assets/icons/dash_poms.png",         "POMS\nUebersicht",      self.open_poms),         2, 0)
+            make_tile("btn_poms",        "assets/icons/dash_poms.png",         "POMS\nUebersicht",      self.open_poms),         1, 2)
 
         content_layout.addLayout(apps_layout)
         dash_h_layout.addWidget(apps_container, stretch=3)
@@ -211,9 +208,10 @@ class DashboardWindow(QMainWindow):
 
         self.stacked_widget.addWidget(self.dashboard_body)
 
-        # --- Module (Karten 2–8) ---
-        self.scanner_app     = OrderEntryApp(self.settings_manager)
-        self.mail_app        = MailScraperApp(self.settings_manager)
+        # --- Module ---
+        self.input_app       = InputApp(self.settings_manager)
+        self.scanner_app     = self.input_app.scanner_app   # Abwaertskompatibilitaet
+        self.mail_app        = self.input_app.mail_app       # Abwaertskompatibilitaet
         self.tracker_app     = TrackerApp(self.settings_manager)
         self.inbound_app     = WareneingangApp(self.settings_manager)
         self.packstation_app = PackstationApp(self.settings_manager)
@@ -223,7 +221,7 @@ class DashboardWindow(QMainWindow):
         self.poms_app = PomsModule(DatabaseManager(self.settings_manager), self.settings_manager)
 
         for app in [
-            self.scanner_app, self.mail_app, self.tracker_app,
+            self.input_app, self.tracker_app,
             self.inbound_app, self.packstation_app, self.finanzen_app, self.poms_app,
         ]:
             self.stacked_widget.addWidget(app)
@@ -256,15 +254,23 @@ class DashboardWindow(QMainWindow):
         elif action_str == "open_packstation":
             self.open_packstation()
 
-    def open_scanner(self):
-        self.stacked_widget.setCurrentWidget(self.scanner_app)
-        self.title_lbl.setText("AUFTRAGSERFASSUNG")
+    def open_input(self, tab="scan"):
+        """Oeffnet das Input-Modul, optional mit bestimmtem Tab."""
+        if tab == "mail":
+            self.input_app.show_mail_tab()
+        else:
+            self.input_app.show_scan_tab()
+        self.stacked_widget.setCurrentWidget(self.input_app)
+        self.title_lbl.setText("INPUT")
         self.btn_back.show()
 
+    def open_scanner(self):
+        """Abwaertskompatibilitaet: Oeffnet Input-Modul auf Beleg-Scan-Tab."""
+        self.open_input(tab="scan")
+
     def open_mail_scraper(self):
-        self.stacked_widget.setCurrentWidget(self.mail_app)
-        self.title_lbl.setText("MAIL SCRAPER")
-        self.btn_back.show()
+        """Abwaertskompatibilitaet: Oeffnet Input-Modul auf E-Mail-Tab."""
+        self.open_input(tab="mail")
 
     def open_tracker(self):
         self.stacked_widget.setCurrentWidget(self.tracker_app)
