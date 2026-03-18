@@ -1006,7 +1006,29 @@ class MailScraperApp(QWidget):
       self.pipeline_dashboard.set_status_text(f"{len(extracted_data_list)} Beleg(e) wurden vorbereitet und koennen jetzt im Wizard geprueft werden.")
       self._log(f"Scanner fertig! {len(extracted_data_list)} Belege erfolgreich erkannt. Lade Ueberpruefungsfenster...")
 
-      dialog = ScraperReviewWizardDialog(list(reversed(extracted_data_list)), self.settings_manager, self)
+      # --- Mail-UID Duplikat-Filter: bereits verarbeitete Mails ausfiltern ---
+      filtered_data_list = extracted_data_list
+      try:
+        from module.database_manager import DatabaseManager
+        dedup_db = DatabaseManager(self.settings_manager)
+        original_count = len(extracted_data_list)
+        filtered_data_list = []
+        for mail_item in extracted_data_list:
+          uid = str(mail_item.get("_mail_uid", "") or "").strip()
+          if uid and dedup_db.mail_uid_exists(uid):
+            continue
+          filtered_data_list.append(mail_item)
+        skipped_count = original_count - len(filtered_data_list)
+        if skipped_count > 0:
+          self._log(f"{skipped_count} von {original_count} Mails wurden bereits verarbeitet und uebersprungen.")
+          if not filtered_data_list:
+            QMessageBox.information(self, "Ergebnis", f"Alle {original_count} erkannten Mails wurden bereits verarbeitet.")
+            return
+      except Exception as dedup_err:
+        log_exception(__name__, dedup_err)
+        filtered_data_list = extracted_data_list
+
+      dialog = ScraperReviewWizardDialog(list(reversed(filtered_data_list)), self.settings_manager, self)
       if dialog.exec() != QDialog.DialogCode.Accepted:
         self._log("Vorgang abgebrochen: Keine weiteren E-Mails gespeichert.")
         return
@@ -1950,6 +1972,7 @@ class ScraperReviewWizardDialog(QDialog):
     self._mapping_state_by_index = {}
     self._active_mapping_panel = None
     self._current_order_review_bundle = None
+    self._current_rechnung_pdf_path = ""
     self.summary = {
       "saved": 0,
       "skipped": 0,
@@ -2033,6 +2056,22 @@ class ScraperReviewWizardDialog(QDialog):
     )
     self.lbl_mapping_badge.setVisible(False)
     banner_layout.addWidget(self.lbl_mapping_badge)
+
+    self.lbl_konfidenz_badge = QLabel("")
+    self.lbl_konfidenz_badge.setStyleSheet(
+        "font-size: 11px; font-weight: bold; color: #9ece6a; background-color: #203225;"
+        " border: 1px solid #9ece6a; border-radius: 4px; padding: 2px 8px;"
+    )
+    self.lbl_konfidenz_badge.setVisible(False)
+    banner_layout.addWidget(self.lbl_konfidenz_badge)
+
+    self.lbl_absender_badge = QLabel("")
+    self.lbl_absender_badge.setStyleSheet(
+        "font-size: 11px; font-weight: bold; color: #a9b1d6; background-color: #2a2a3a;"
+        " border: 1px solid #6b7280; border-radius: 4px; padding: 2px 8px;"
+    )
+    self.lbl_absender_badge.setVisible(False)
+    banner_layout.addWidget(self.lbl_absender_badge)
 
     layout.addWidget(self.mail_info_banner)
 
@@ -2212,6 +2251,31 @@ class ScraperReviewWizardDialog(QDialog):
     self.inputs = self.einkauf_form_widget.inputs
     self.einkauf_form_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
     kopf_box.addWidget(self.einkauf_form_widget)
+
+    # Rechnungs-Sektion (Platzhalter fuer Phase D1)
+    self.rechnung_frame = QFrame()
+    self.rechnung_frame.setStyleSheet("QFrame { background-color: #1f2335; border: 1px solid #414868; border-radius: 6px; }")
+    rechnung_layout = QVBoxLayout(self.rechnung_frame)
+    rechnung_layout.setContentsMargins(10, 8, 10, 8)
+    rechnung_layout.setSpacing(6)
+    lbl_rechnung_title = QLabel("Rechnung")
+    lbl_rechnung_title.setStyleSheet("font-size: 13px; font-weight: bold; color: #7aa2f7; border: none;")
+    rechnung_layout.addWidget(lbl_rechnung_title)
+    self.chk_rechnung_vorhanden = QCheckBox("Rechnung vorhanden")
+    self.chk_rechnung_vorhanden.setStyleSheet("color: #c0caf5; font-size: 12px; border: none;")
+    rechnung_layout.addWidget(self.chk_rechnung_vorhanden)
+    self.btn_rechnung_pdf = QPushButton("PDF als Rechnung verknuepfen")
+    self.btn_rechnung_pdf.setCursor(Qt.CursorShape.PointingHandCursor)
+    self.btn_rechnung_pdf.setStyleSheet("font-size: 12px; padding: 4px 10px;")
+    self.btn_rechnung_pdf.setVisible(False)
+    self.btn_rechnung_pdf.clicked.connect(self._on_link_invoice_pdf)
+    rechnung_layout.addWidget(self.btn_rechnung_pdf)
+    self.lbl_rechnung_pdf_path = QLabel("")
+    self.lbl_rechnung_pdf_path.setStyleSheet("font-size: 11px; color: #a9b1d6; border: none;")
+    self.lbl_rechnung_pdf_path.setWordWrap(True)
+    rechnung_layout.addWidget(self.lbl_rechnung_pdf_path)
+    kopf_box.addWidget(self.rechnung_frame)
+
     kopf_box.addStretch(1)
     kopf_scroll.setWidget(kopf_panel)
     self.data_tabs.addTab(kopf_scroll, "Kopfdaten")
@@ -2268,6 +2332,33 @@ class ScraperReviewWizardDialog(QDialog):
     self.order_review_widget = OrderReviewPanelWidget(self)
     self.order_review_widget.setMinimumHeight(96)
     uebersicht_box.addWidget(self.order_review_widget)
+
+    # Auto-Mapping-Log
+    lbl_mapping_log = QLabel("Auto-Mapping")
+    lbl_mapping_log.setStyleSheet("font-size: 13px; font-weight: bold; color: #7aa2f7;")
+    uebersicht_box.addWidget(lbl_mapping_log)
+    self.lbl_auto_mapping_log = QLabel("Keine automatischen Mappings.")
+    self.lbl_auto_mapping_log.setWordWrap(True)
+    self.lbl_auto_mapping_log.setStyleSheet("font-size: 12px; color: #a9b1d6; background-color: #1f2335; border: 1px solid #414868; border-radius: 6px; padding: 8px;")
+    uebersicht_box.addWidget(self.lbl_auto_mapping_log)
+
+    # Warnungen
+    lbl_warnings_title = QLabel("Warnungen")
+    lbl_warnings_title.setStyleSheet("font-size: 13px; font-weight: bold; color: #f7c66f;")
+    uebersicht_box.addWidget(lbl_warnings_title)
+    self.lbl_warnings = QLabel("Keine Warnungen.")
+    self.lbl_warnings.setWordWrap(True)
+    self.lbl_warnings.setStyleSheet("font-size: 12px; color: #a9b1d6; background-color: #1f2335; border: 1px solid #414868; border-radius: 6px; padding: 8px;")
+    uebersicht_box.addWidget(self.lbl_warnings)
+
+    # Validierungs-Checkliste
+    lbl_validation_title = QLabel("Validierung")
+    lbl_validation_title.setStyleSheet("font-size: 13px; font-weight: bold; color: #9ece6a;")
+    uebersicht_box.addWidget(lbl_validation_title)
+    self.lbl_validation_checklist = QLabel("")
+    self.lbl_validation_checklist.setWordWrap(True)
+    self.lbl_validation_checklist.setStyleSheet("font-size: 12px; color: #c0caf5; background-color: #1f2335; border: 1px solid #414868; border-radius: 6px; padding: 8px;")
+    uebersicht_box.addWidget(self.lbl_validation_checklist)
 
     uebersicht_box.addStretch(1)
     uebersicht_scroll.setWidget(uebersicht_panel)
@@ -2482,23 +2573,21 @@ class ScraperReviewWizardDialog(QDialog):
     self.lbl_stats.setText(" | ".join(parts))
 
   def _set_mapping_panel_collapsed(self, collapsed):
-    """Klappt das rechte Mapping-Panel komplett ein/aus und verteilt den Platz um."""
+    """Klappt das rechte Mapping-Panel ein/aus und verteilt den Platz um."""
     sizes = self.content_splitter.sizes()
     if len(sizes) < 3:
       return
     total = sum(sizes)
     if collapsed:
-      # Mapping-Panel komplett ausblenden – Platz geht an Mail-Vorschau + Formular
+      # Mapping-Panel einklappen: nur Status-Zeile + Button sichtbar
+      mapping_min = 180
+      remaining = total - mapping_min
+      self.content_splitter.setSizes([remaining // 2, remaining - remaining // 2, mapping_min])
+      self.mapping_panel_widget.setMaximumWidth(200)
       self.lbl_mapping_side_hint.setVisible(False)
       self.mapping_frame.setVisible(False)
-      self.mapping_panel_widget.setMinimumWidth(0)
-      self.mapping_panel_widget.setMaximumWidth(0)
-      self.mapping_panel_widget.setVisible(False)
-      half = total // 2
-      self.content_splitter.setSizes([half, total - half, 0])
     else:
       # Mapping-Panel aufklappen
-      self.mapping_panel_widget.setVisible(True)
       self.mapping_panel_widget.setMaximumWidth(420)
       self.mapping_panel_widget.setMinimumWidth(300)
       self.lbl_mapping_side_hint.setVisible(True)
@@ -2858,9 +2947,6 @@ class ScraperReviewWizardDialog(QDialog):
     else:
       self.preview_tabs.setCurrentIndex(0)
 
-    # --- Tab auf Kopfdaten zuruecksetzen ---
-    self.data_tabs.setCurrentIndex(0)
-
     if self._mapping_done_by_index.get(self.current_index, False):
       self.mapping_frame.setVisible(False)
       self._clear_mapping_panel()
@@ -2871,8 +2957,10 @@ class ScraperReviewWizardDialog(QDialog):
     idx = self.current_index
     QTimer.singleShot(0, lambda idx=idx: self._auto_prompt_mapping_for_index(idx))
 
-    # --- Duplikat-Pre-Check ---
+    # --- Duplikat-Pre-Check + Konfidenz + Absender ---
     self._check_duplicate_for_current()
+    self._update_konfidenz_badge()
+    self._update_absender_badge()
 
     # --- Navigationsleiste + Stats aktualisieren ---
     self._update_nav_dots()
@@ -2880,6 +2968,148 @@ class ScraperReviewWizardDialog(QDialog):
 
     # --- LookupService: Logo aus DB laden bevor API aufgerufen wird ---
     self._auto_lookup_shop_logo_from_db()
+
+    # --- Paketdienst Auto-Detect ---
+    self._auto_detect_paketdienst()
+
+    # --- Uebersicht-Tab + Rechnungs-Sektion aktualisieren ---
+    self._update_uebersicht_tab()
+    self._update_rechnung_section()
+
+    # --- Tab auf Kopfdaten zuruecksetzen ---
+    self.data_tabs.setCurrentIndex(0)
+
+  _CARRIER_PATTERNS = {
+    "dhl": "DHL", "dpd": "DPD", "gls": "GLS",
+    "ups": "UPS", "hermes": "Hermes", "amazon logistics": "Amazon Logistics",
+    "deutsche post": "Deutsche Post", "fedex": "FedEx",
+  }
+
+  def _auto_detect_paketdienst(self):
+    """Erkennt den Paketdienst aus Tracking-Nummer, Shop-Name oder Mail-Body."""
+    try:
+      paketdienst_widget = self.inputs.get("paketdienst")
+      if not paketdienst_widget or not hasattr(paketdienst_widget, "text"):
+        return
+      if str(paketdienst_widget.text()).strip():
+        return  # bereits ausgefuellt
+
+      item = self.data_list[self.current_index] if self.current_index < len(self.data_list) else {}
+      search_texts = [
+        str(item.get("tracking_nummer_einkauf", "") or "").lower(),
+        str(item.get("shop_name", "") or "").lower(),
+        str(item.get("subject", "") or item.get("_email_subject", "") or "").lower(),
+      ]
+      combined = " ".join(search_texts)
+
+      for pattern, carrier in self._CARRIER_PATTERNS.items():
+        if pattern in combined:
+          paketdienst_widget.setText(carrier)
+          return
+    except Exception as e:
+      log_exception(__name__, e)
+
+  def _update_rechnung_section(self):
+    """Aktualisiert die Rechnungs-Sektion basierend auf Mail-Anhaengen."""
+    try:
+      self._current_rechnung_pdf_path = ""
+      self.lbl_rechnung_pdf_path.setText("")
+      self.chk_rechnung_vorhanden.setChecked(False)
+      item = self.data_list[self.current_index] if self.current_index < len(self.data_list) else {}
+      attachments = item.get("_attachments") or item.get("attachments") or []
+      has_pdf = False
+      auto_invoice = False
+      for att in attachments:
+        path = str(att.get("path", "") or att.get("file_path", "") or "").strip()
+        if path.lower().endswith(".pdf"):
+          has_pdf = True
+          fname = os.path.basename(path).lower()
+          if any(kw in fname for kw in ("rechnung", "invoice", "factura", "billing")):
+            auto_invoice = True
+            self._current_rechnung_pdf_path = path
+            self.lbl_rechnung_pdf_path.setText(f"Auto-erkannt: {os.path.basename(path)}")
+            self.chk_rechnung_vorhanden.setChecked(True)
+            break
+      self.btn_rechnung_pdf.setVisible(has_pdf)
+    except Exception as e:
+      log_exception(__name__, e)
+
+  def _update_absender_badge(self):
+    """Warnt dezent wenn die Absender-Domain nicht in den bekannten Mappings ist."""
+    try:
+      item = self.data_list[self.current_index] if self.current_index < len(self.data_list) else {}
+      sender = str(item.get("_email_sender", "") or item.get("bestell_email", "") or "").strip().lower()
+      if not sender or "@" not in sender:
+        self.lbl_absender_badge.setVisible(False)
+        return
+
+      domain = sender.split("@")[-1].strip()
+      # Pruefen ob die Domain in mapping.json bekannt ist
+      known = False
+      try:
+        mapping_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "mapping.json")
+        if os.path.exists(mapping_path):
+          with open(mapping_path, "r", encoding="utf-8") as f:
+            mapping_data = json.load(f)
+          shop_mappings = mapping_data.get("shop_name", {})
+          known_values = set()
+          for k, v in shop_mappings.items():
+            known_values.add(k.lower())
+            known_values.add(str(v).lower())
+          for val in known_values:
+            if domain in val or val in domain:
+              known = True
+              break
+      except Exception:
+        pass
+
+      if not known:
+        self.lbl_absender_badge.setText(f"Absender unbekannt ({domain})")
+        self.lbl_absender_badge.setStyleSheet(
+          "font-size: 11px; font-weight: bold; color: #f7c66f; background-color: #3a3117;"
+          " border: 1px solid #f7c66f; border-radius: 4px; padding: 2px 8px;"
+        )
+        self.lbl_absender_badge.setVisible(True)
+      else:
+        self.lbl_absender_badge.setVisible(False)
+    except Exception:
+      self.lbl_absender_badge.setVisible(False)
+
+  def _update_konfidenz_badge(self):
+    """Zaehlt ausgefuellte Pflichtfelder und aktualisiert das Konfidenz-Badge."""
+    try:
+      filled = 0
+      total = 5
+      for key in ("bestellnummer", "shop_name", "bestell_datum", "gesamt_ekp_brutto"):
+        w = self.inputs.get(key)
+        if w and hasattr(w, "text") and str(w.text()).strip():
+          if key == "gesamt_ekp_brutto":
+            try:
+              if float(str(w.text()).replace(",", ".")) > 0:
+                filled += 1
+            except (ValueError, TypeError):
+              pass
+          else:
+            filled += 1
+      # Min. 1 Artikel
+      items = self.einkauf_items_widget.get_items()
+      if items:
+        filled += 1
+
+      self.lbl_konfidenz_badge.setText(f"{filled}/{total} Pflichtfelder")
+      if filled == total:
+        self.lbl_konfidenz_badge.setStyleSheet(
+          "font-size: 11px; font-weight: bold; color: #9ece6a; background-color: #203225;"
+          " border: 1px solid #9ece6a; border-radius: 4px; padding: 2px 8px;"
+        )
+      else:
+        self.lbl_konfidenz_badge.setStyleSheet(
+          "font-size: 11px; font-weight: bold; color: #f7c66f; background-color: #3a3117;"
+          " border: 1px solid #f7c66f; border-radius: 4px; padding: 2px 8px;"
+        )
+      self.lbl_konfidenz_badge.setVisible(True)
+    except Exception:
+      self.lbl_konfidenz_badge.setVisible(False)
 
   def _check_duplicate_for_current(self):
     """Prueft ob die Bestellnummer der aktuellen Mail bereits in der DB existiert."""
@@ -3076,31 +3306,6 @@ class ScraperReviewWizardDialog(QDialog):
     base = self.einkauf_form_widget.apply_to_payload(base)
     base["waren"] = self.einkauf_items_widget.get_items()
     return base
-  def _on_add_item_row(self):
-    """Fuegt eine leere Artikelzeile zur Items-Tabelle hinzu."""
-    try:
-      items = self.einkauf_items_widget.get_items()
-      items.append({"produkt_name": "", "varianten_info": "", "ean": "", "menge": "1", "ekp_brutto": "0.00"})
-      self.einkauf_items_widget.set_items(items)
-    except Exception as e:
-      logging.exception("Fehler beim Hinzufuegen einer Artikelzeile: %s", e)
-
-  def _on_remove_item_row(self):
-    """Entfernt die ausgewaehlte Artikelzeile."""
-    try:
-      context = self.einkauf_items_widget.get_selected_context()
-      if not context:
-        QMessageBox.information(self, "Zeile entfernen", "Bitte zuerst eine Zeile auswaehlen.")
-        return
-      row = int(context.get("row", -1))
-      items = self.einkauf_items_widget.get_items()
-      if row < 0 or row >= len(items):
-        return
-      items.pop(row)
-      self.einkauf_items_widget.set_items(items)
-    except Exception as e:
-      logging.exception("Fehler beim Entfernen einer Artikelzeile: %s", e)
-
   def _lookup_ean_for_selected_row(self):
     if self.ean_lookup_worker is not None and self.ean_lookup_worker.isRunning():
       QMessageBox.information(self, "EAN Suche", "Es laeuft bereits eine EAN-Suche im Hintergrund.")
@@ -3123,8 +3328,8 @@ class ScraperReviewWizardDialog(QDialog):
       "produkt_name": produkt_name,
       "varianten_info": varianten_info,
     }
-    self.btn_ean_lookup.setEnabled(False)
-    self.btn_ean_lookup.setText("EAN Suche laeuft...")
+    self.einkauf_items_widget.btn_ean_lookup.setEnabled(False)
+    self.einkauf_items_widget.btn_ean_lookup.setText("EAN Suche laeuft...")
 
     self.ean_lookup_worker = EanLookupWorker(
       self.settings_manager,
@@ -3138,8 +3343,8 @@ class ScraperReviewWizardDialog(QDialog):
     self.ean_lookup_worker.start()
 
   def _finish_ean_lookup_ui(self):
-    self.btn_ean_lookup.setEnabled(True)
-    self.btn_ean_lookup.setText("EAN suchen (markierte Zeile)")
+    self.einkauf_items_widget.btn_ean_lookup.setEnabled(True)
+    self.einkauf_items_widget.btn_ean_lookup.setText("EAN suchen (markierte Zeile)")
     self.ean_lookup_worker = None
 
   def _on_ean_lookup_finished(self, payload):
@@ -3227,6 +3432,135 @@ class ScraperReviewWizardDialog(QDialog):
       log_exception(__name__, e)
       QMessageBox.critical(self, "Mapping-Fehler", f"Mapping fehlgeschlagen:\n{e}")
 
+  # ── Artikel-Zeilen-Management ─────────────────────────────────────
+
+  def _on_add_item_row(self):
+    """Fuegt eine leere Artikelzeile zur Items-Tabelle hinzu."""
+    try:
+      items = self.einkauf_items_widget.get_items()
+      items.append({"produkt_name": "", "varianten_info": "", "ean": "", "menge": "1", "ekp_brutto": "0.00"})
+      self.einkauf_items_widget.set_items(items)
+    except Exception as e:
+      log_exception(__name__, e)
+
+  def _on_remove_item_row(self):
+    """Entfernt die ausgewaehlte Artikelzeile."""
+    try:
+      context = self.einkauf_items_widget.get_selected_context()
+      if not context:
+        QMessageBox.information(self, "Zeile entfernen", "Bitte zuerst eine Zeile auswaehlen.")
+        return
+      row = int(context.get("row", -1))
+      items = self.einkauf_items_widget.get_items()
+      if row < 0 or row >= len(items):
+        return
+      items.pop(row)
+      self.einkauf_items_widget.set_items(items)
+    except Exception as e:
+      log_exception(__name__, e)
+
+  # ── Rechnungs-PDF-Verknuepfung (Phase D1) ─────────────────────────
+
+  def _on_link_invoice_pdf(self):
+    """Verknuepft den ersten PDF-Anhang der aktuellen Mail als Rechnung."""
+    try:
+      item = self.data_list[self.current_index] if self.current_index < len(self.data_list) else {}
+      pdf_path = ""
+      for attachment in (item.get("_attachments") or item.get("attachments") or []):
+        path = str(attachment.get("path", "") or attachment.get("file_path", "") or "").strip()
+        if path.lower().endswith(".pdf"):
+          pdf_path = path
+          break
+      if pdf_path:
+        self.lbl_rechnung_pdf_path.setText(f"Verknuepft: {os.path.basename(pdf_path)}")
+        self._current_rechnung_pdf_path = pdf_path
+        self.chk_rechnung_vorhanden.setChecked(True)
+      else:
+        QMessageBox.information(self, "Rechnung", "Kein PDF-Anhang in dieser Mail gefunden.")
+    except Exception as e:
+      log_exception(__name__, e)
+
+  # ── Uebersicht-Tab aktualisieren ──────────────────────────────────
+
+  def _update_uebersicht_tab(self):
+    """Aktualisiert Auto-Mapping-Log, Warnungen und Validierungs-Checkliste."""
+    try:
+      item = self.data_list[self.current_index] if self.current_index < len(self.data_list) else {}
+
+      # Auto-Mapping-Log
+      auto_mapped = item.get("_auto_mapped_fields", {})
+      if auto_mapped:
+        lines = []
+        for key, info in auto_mapped.items():
+          raw = str(info.get("raw", "") or "")
+          resolved = str(info.get("resolved", "") or "")
+          lines.append(f"{key}: \"{raw}\" \u2192 \"{resolved}\"")
+        self.lbl_auto_mapping_log.setText("\n".join(lines))
+      else:
+        self.lbl_auto_mapping_log.setText("Keine automatischen Mappings.")
+
+      # Warnungen
+      warnings = []
+      # Preisdelta
+      items_list = self.einkauf_items_widget.get_items()
+      warenwert = 0.0
+      for art in items_list:
+        try:
+          m = float(str(art.get("menge", 1) or 1).replace(",", "."))
+          p = float(str(art.get("ekp_brutto", 0) or 0).replace(",", "."))
+          warenwert += m * p
+        except (ValueError, TypeError):
+          pass
+      ki_gesamt = 0.0
+      try:
+        ki_gesamt = float(str(item.get("gesamt_ekp_brutto", 0) or 0).replace(",", "."))
+      except (ValueError, TypeError):
+        pass
+      if ki_gesamt > 0 and abs(warenwert - ki_gesamt) > 0.02:
+        warnings.append(f"Preisabweichung: Berechnet {warenwert:.2f} EUR vs. KI {ki_gesamt:.2f} EUR")
+
+      # Fehlende Felder
+      for key, label in [("bestellnummer", "Bestellnummer"), ("shop_name", "Shop"), ("bestell_datum", "Bestelldatum")]:
+        widget = self.inputs.get(key)
+        if widget and not str(widget.text()).strip():
+          warnings.append(f"Feld \"{label}\" ist leer")
+
+      if not items_list:
+        warnings.append("Keine Artikelpositionen vorhanden")
+
+      self.lbl_warnings.setText("\n".join(warnings) if warnings else "Keine Warnungen.")
+      self.lbl_warnings.setStyleSheet(
+        f"font-size: 12px; color: {'#f7c66f' if warnings else '#a9b1d6'}; background-color: #1f2335; border: 1px solid #414868; border-radius: 6px; padding: 8px;"
+      )
+
+      # Validierungs-Checkliste
+      def _field_ok(key):
+        w = self.inputs.get(key)
+        if w and hasattr(w, "text"):
+          return bool(str(w.text()).strip())
+        return False
+
+      checks = []
+      checks.append(("\u2713" if _field_ok("bestellnummer") else "\u2717") + " Bestellnummer")
+      checks.append(("\u2713" if _field_ok("shop_name") else "\u2717") + " Shop-Name")
+      checks.append(("\u2713" if _field_ok("bestell_datum") else "\u2717") + " Bestelldatum")
+
+      gesamt_ok = False
+      try:
+        g = self.inputs.get("gesamt_ekp_brutto")
+        if g and hasattr(g, "text"):
+          gesamt_ok = float(str(g.text()).replace(",", ".")) > 0
+      except (ValueError, TypeError):
+        pass
+      checks.append(("\u2713" if gesamt_ok else "\u2717") + " Gesamtpreis")
+      checks.append(("\u2713" if len(items_list) > 0 else "\u2717") + " Min. 1 Artikel")
+      checks.append(("\u2713" if self._mapping_done_by_index.get(self.current_index, False) else "\u2717") + " Mapping erledigt")
+
+      self.lbl_validation_checklist.setText("\n".join(checks))
+
+    except Exception as e:
+      log_exception(__name__, e)
+
   def _save_current_and_next(self):
     try:
       if not self._mapping_done_by_index.get(self.current_index, False):
@@ -3243,6 +3577,10 @@ class ScraperReviewWizardDialog(QDialog):
       payload["quelle"] = "mail_scraper"
       payload["mail_uid"] = str(item.get("_mail_uid", "") or "").strip()
       payload["mail_account"] = str(item.get("_mail_account", "") or "").strip()
+      if self.chk_rechnung_vorhanden.isChecked():
+        payload["rechnung_vorhanden"] = True
+        if self._current_rechnung_pdf_path:
+          payload["rechnung_pdf_pfad"] = self._current_rechnung_pdf_path
       self.data_list[self.current_index] = payload
 
       def _on_order_number_changed(new_no):

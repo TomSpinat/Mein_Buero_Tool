@@ -147,6 +147,14 @@ class SchemaManagementMixin:
                 cursor_db.execute("ALTER TABLE einkauf_bestellungen ADD COLUMN mail_account VARCHAR(255)")
             except Error:
                 pass
+            try:
+                cursor_db.execute("ALTER TABLE einkauf_bestellungen ADD COLUMN rechnung_vorhanden BOOLEAN DEFAULT FALSE")
+            except Error:
+                pass
+            try:
+                cursor_db.execute("ALTER TABLE einkauf_bestellungen ADD COLUMN rechnung_pdf_pfad VARCHAR(500)")
+            except Error:
+                pass
 
             cursor_db.execute(
                 f"""

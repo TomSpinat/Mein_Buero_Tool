@@ -1,6 +1,15 @@
 {
-    "shops": {},
+    "shops": {
+        "Future Deals GmbH": "Future Deals GmbH",
+        "Amazon ESP": "Amazon ESP",
+        "DHL und Deutsche Post": "DHL und Deutsche Post"
+    },
     "zahlungsarten": {
-        "Bank account": "Bank account"
+        "Bank account": "Bank account",
+        "Bank account ... 500": "Bank account ... 500",
+        "Ueberweisung (DE12 5001)": "Ueberweisung (DE12 5001)",
+        "Mastercard": "Mastercard",
+        "Kreditkarte": "Kreditkarte",
+        "direct debit": "direct debit"
     }
 }

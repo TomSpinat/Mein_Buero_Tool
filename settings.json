@@ -14,7 +14,7 @@
             "host": "imap.ionos.de",
             "port": "993",
             "user": "kontakt@spirgath.de",
-            "last_mail_uid": 181,
+            "last_mail_uid": 201,
             "secret_ref": "c98f69d097814f68a519081fcf386c91"
         }
     ],
@@ -44,7 +44,9 @@
         "shipment-tracking@amazon.fr",
         "noreply_shop@fritz.com",
         "service@notebooksbilliger.de",
-        "timthebest@hotmail.de"
+        "timthebest@hotmail.de",
+        "auto-confirm@amazon.es",
+        "noreply@dhl.com"
     ],
     "trusted_mail_domains": [
         "news.paypal.com",
@@ -53,8 +55,16 @@
         "info.nbb.com",
         "amazon.de",
         "revolut.com",
-        "amazon.it"
+        "amazon.it",
+        "amazon.es",
+        "dhl.com",
+        "business.amazon.de"
     ],
-    "test_wipe_on_start": true,
-    "test_last_wipe_at": "2026-03-15 21:02:50"
+    "test_wipe_on_start": false,
+    "test_last_wipe_at": "2026-03-16 20:31:06",
+    "steuer_modus": "regelbesteuerung",
+    "default_ust_satz": 19.0,
+    "_last_dirs": {
+        "upload_beleg": "C:/Users/timth/Desktop/Mein_Buero_Tool/dev_tools/test_daten"
+    }
 }

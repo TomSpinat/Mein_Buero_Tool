@@ -349,6 +349,26 @@ class OrderProcessingMixin:
             log_exception(__name__, e, extra={"bestellnummer": bestellnummer})
             return False
 
+    def mail_uid_exists(self, mail_uid: str) -> bool:
+        """Prueft ob eine Mail-UID bereits in einkauf_bestellungen verarbeitet wurde."""
+        uid = str(mail_uid or "").strip()
+        if not uid:
+            return False
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT 1 FROM einkauf_bestellungen WHERE mail_uid = %s LIMIT 1",
+                (uid,),
+            )
+            found = cursor.fetchone() is not None
+            cursor.close()
+            conn.close()
+            return found
+        except Exception as e:
+            log_exception(__name__, e, extra={"mail_uid": mail_uid})
+            return False
+
     def upsert_einkauf_mit_waren(self, data_dict, apply_pending_match=True):
         """
         Nimmt das normierte Gemini JSON-Dictionary entgegen und speichert
@@ -411,10 +431,11 @@ class OrderProcessingMixin:
                 gesamt_ekp_brutto, warenwert_brutto, versandkosten_brutto,
                 nebenkosten_brutto, rabatt_brutto, einstand_gesamt_brutto, ust_satz,
                 reverse_charge, storno_status, einstand_gesamt_netto,
-                zahlungsart, quelle, mail_uid, mail_account
+                zahlungsart, quelle, mail_uid, mail_account,
+                rechnung_vorhanden, rechnung_pdf_pfad
             ) VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             ON DUPLICATE KEY UPDATE
                 kaufdatum = IF(VALUES(kaufdatum) IS NOT NULL, VALUES(kaufdatum), kaufdatum),
@@ -435,7 +456,8 @@ class OrderProcessingMixin:
                 einstand_gesamt_netto = IF(VALUES(einstand_gesamt_netto) > 0, VALUES(einstand_gesamt_netto), einstand_gesamt_netto),
                 zahlungsart = IF(VALUES(zahlungsart) != '', VALUES(zahlungsart), zahlungsart),
                 quelle = IF(VALUES(quelle) IS NOT NULL AND VALUES(quelle) != '', VALUES(quelle), quelle),
-                mail_account = IF(VALUES(mail_account) IS NOT NULL AND VALUES(mail_account) != '', VALUES(mail_account), mail_account)
+                rechnung_vorhanden = IF(VALUES(rechnung_vorhanden) IS TRUE, VALUES(rechnung_vorhanden), rechnung_vorhanden),
+                rechnung_pdf_pfad = IF(VALUES(rechnung_pdf_pfad) IS NOT NULL AND VALUES(rechnung_pdf_pfad) != '', VALUES(rechnung_pdf_pfad), rechnung_pdf_pfad)
             """
 
             kaufdatum = data_dict.get("kaufdatum") or None
@@ -471,6 +493,8 @@ class OrderProcessingMixin:
                 str(data_dict.get("quelle", "")).strip() or None,
                 str(data_dict.get("mail_uid", "")).strip() or None,
                 str(data_dict.get("mail_account", "")).strip() or None,
+                bool(data_dict.get("rechnung_vorhanden", False)),
+                str(data_dict.get("rechnung_pdf_pfad", "")).strip() or None,
             ))
 
             cursor.execute("SELECT id FROM einkauf_bestellungen WHERE bestellnummer = %s", (bestellnummer,))
