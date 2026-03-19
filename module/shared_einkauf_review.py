@@ -897,7 +897,8 @@ def prepare_and_save_einkauf_workflow(parent_widget, settings_manager,
                                       db=None, review_bundle=None,
                                       skip_existing_review=False, text_fn=None,
                                       payload_enricher=None,
-                                      validate_waren=True):
+                                      validate_waren=True,
+                                      prepared_payload=None):
   """Fuehrt Pre-Save-Vorbereitung und Save-Workflow in einem Ablauf aus.
 
   Nutzt prepare_einkauf_save() fuer Payload + Validierung und fuehrt bei
@@ -917,6 +918,8 @@ def prepare_and_save_einkauf_workflow(parent_widget, settings_manager,
     text_fn: Optionale Text-Normalisierungsfunktion fuer Order-Number-Callback.
     payload_enricher: Optionaler Callback zur finalen Payload-Anreicherung.
     validate_waren: Wenn True, werden Artikel ueber prepare_einkauf_save() validiert.
+    prepared_payload: Optionaler bereits vorbereiteter Payload. Wenn gesetzt,
+      wird kein erneutes Einsammeln aus den Widgets ausgefuehrt.
 
   Returns:
     dict:
@@ -928,7 +931,10 @@ def prepare_and_save_einkauf_workflow(parent_widget, settings_manager,
       'db': Aktualisierte DB-Verbindung.
       'renamed': bool - Ob die Bestellnummer umbenannt wurde.
   """
-  if validate_waren:
+  if isinstance(prepared_payload, dict):
+    payload = dict(prepared_payload)
+    issues = validate_einkauf_waren(payload.get("waren", [])) if validate_waren else []
+  elif validate_waren:
     payload, issues = prepare_einkauf_save(
       form_widget, items_widget, base_payload=base_payload,
     )

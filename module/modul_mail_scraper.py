@@ -3040,8 +3040,18 @@ class ScraperReviewWizardDialog(QDialog):
       source_payload=item,
     )
     self._apply_payload_to_current_mail(state.get("payload", {}))
-    self._refresh_current_mail_preview()
-    self._refresh_current_mail_mapping_panel()
+    item = self._current_mail_record()
+    self._render_current_preview()
+    self._populate_attachment_preview()
+    if item.get("_primary_scan_source_type", "") == "mail_attachment" and self._pdf_attachment_rows(item):
+      self.preview_tabs.setCurrentIndex(1)
+    else:
+      self.preview_tabs.setCurrentIndex(0)
+    self.mapping_frame.setVisible(False)
+    self._clear_mapping_panel()
+    self._update_mapping_state_ui()
+    idx = self.current_index
+    QTimer.singleShot(0, lambda idx=idx: self._auto_prompt_mapping_for_index(idx))
     self._check_duplicate_for_current()
     self._update_konfidenz_badge()
     self._update_absender_badge()
@@ -3053,26 +3063,6 @@ class ScraperReviewWizardDialog(QDialog):
     self._update_uebersicht_tab()
     self._update_rechnung_section()
     self.data_tabs.setCurrentIndex(0)
-
-  # ── Lade-Phasen (intern) ──────────────────────────────────────
-
-  def _refresh_current_mail_preview(self):
-    """Phase 2: Preview + Anhaenge rendern, passenden Preview-Tab waehlen."""
-    self._render_current_preview()
-    self._populate_attachment_preview()
-    item = self._current_mail_record()
-    if item.get("_primary_scan_source_type", "") == "mail_attachment" and self._pdf_attachment_rows(item):
-      self.preview_tabs.setCurrentIndex(1)
-    else:
-      self.preview_tabs.setCurrentIndex(0)
-
-  def _refresh_current_mail_mapping_panel(self):
-    """Phase 3: Mapping-Panel zuruecksetzen, Status-UI aktualisieren, Auto-Prompt starten."""
-    self.mapping_frame.setVisible(False)
-    self._clear_mapping_panel()
-    self._update_mapping_state_ui()
-    idx = self.current_index
-    QTimer.singleShot(0, lambda idx=idx: self._auto_prompt_mapping_for_index(idx))
 
   _CARRIER_PATTERNS = {
     "dhl": "DHL", "dpd": "DPD", "gls": "GLS",
@@ -3509,12 +3499,12 @@ class ScraperReviewWizardDialog(QDialog):
         self.einkauf_form_widget,
         self.einkauf_items_widget,
         self.inputs,
-        base_payload=payload,
-        payload_dict=payload,
+        payload_dict=apply_result["payload"],
         db=self._shared_db,
         review_bundle=apply_result["review_bundle"],
         skip_existing_review=True, text_fn=self._safe_text,
         validate_waren=False,
+        prepared_payload=apply_result["payload"],
       )
       self._shared_db = result["db"]
       if result["issues"]:
