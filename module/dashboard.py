@@ -93,20 +93,6 @@ class DashboardWindow(QMainWindow):
             self._in_resize = False
 
     # ------------------------------------------------------------------
-    # Abwaertskompatibilitaet – Submodul-Zugriff ueber InputApp
-    # ------------------------------------------------------------------
-
-    @property
-    def scanner_app(self):
-        """Liefert den Scanner-Fachkern aus der InputApp (Abwaertskompatibilitaet)."""
-        return self.input_app.scanner_app
-
-    @property
-    def mail_app(self):
-        """Liefert den Mail-Fachkern aus der InputApp (Abwaertskompatibilitaet)."""
-        return self.input_app.mail_app
-
-    # ------------------------------------------------------------------
     # Aufbau
     # ------------------------------------------------------------------
 
@@ -270,6 +256,8 @@ class DashboardWindow(QMainWindow):
     def open_input(self, tab=InputApp.TAB_SCAN):
         """Oeffnet das Input-Modul auf dem angegebenen Tab.
 
+        Das ist der kanonische Einstiegspunkt fuer den Input-Bereich.
+
         Args:
             tab: InputApp.TAB_SCAN (Standard) oder InputApp.TAB_MAIL.
         """
@@ -278,18 +266,9 @@ class DashboardWindow(QMainWindow):
         self.title_lbl.setText("INPUT")
         self.btn_back.show()
 
-    # ── Public-API-Wrapper (Abwaertskompatibilitaet) ─────────────
-    # Werden intern nicht mehr aufgerufen – bleiben als stabile
-    # oeffentliche Schnittstelle fuer externe Aufrufer erhalten.
-
-    def open_scanner(self):
-        """[Compat] Oeffnet Input-Modul auf Beleg-Scan-Tab."""
-        self.open_input(tab=InputApp.TAB_SCAN)
-
-    def open_mail_scraper(self):
-        """[Compat] Oeffnet Input-Modul auf E-Mail-Tab."""
-        self.open_input(tab=InputApp.TAB_MAIL)
-
+    # ------------------------------------------------------------------
+    # Weitere Modulnavigation
+    # ------------------------------------------------------------------
     def open_tracker(self):
         self.stacked_widget.setCurrentWidget(self.tracker_app)
         self.tracker_app.refresh_data()

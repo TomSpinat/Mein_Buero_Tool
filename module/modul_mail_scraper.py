@@ -2822,20 +2822,6 @@ class ScraperReviewWizardDialog(QDialog):
     if self._has_current_mail():
       self.data_list[self.current_index] = data
 
-  # Alias: Abwaertskompatibilitaet – bevorzuge _current_mail_record().
-  _current_mail_item = _current_mail_record
-
-  def _update_current_mail_preview_and_attachments(self):
-    """Rendert Preview und Anhaenge-Sektion fuer die aktuelle Mail."""
-    self._render_current_preview()
-    self._populate_attachment_preview()
-
-  def _update_current_mail_badges(self):
-    """Aktualisiert alle Status-Badges der aktuellen Mail."""
-    self._check_duplicate_for_current()
-    self._update_konfidenz_badge()
-    self._update_absender_badge()
-
   def _build_preview_render_result(self, item):
     return SafeMailRenderer.prepare_html(
       item.get("_original_email_html", ""),
@@ -3056,9 +3042,14 @@ class ScraperReviewWizardDialog(QDialog):
     self._apply_payload_to_current_mail(state.get("payload", {}))
     self._refresh_current_mail_preview()
     self._refresh_current_mail_mapping_panel()
-    self._update_current_mail_badges()
-    self._refresh_current_mail_navigation()
-    self._auto_enrich_current_mail()
+    self._check_duplicate_for_current()
+    self._update_konfidenz_badge()
+    self._update_absender_badge()
+    self._set_progress_text()
+    self._update_nav_dots()
+    self._update_footer_stats()
+    self._auto_lookup_shop_logo_from_db()
+    self._auto_detect_paketdienst()
     self._update_uebersicht_tab()
     self._update_rechnung_section()
     self.data_tabs.setCurrentIndex(0)
@@ -3067,7 +3058,8 @@ class ScraperReviewWizardDialog(QDialog):
 
   def _refresh_current_mail_preview(self):
     """Phase 2: Preview + Anhaenge rendern, passenden Preview-Tab waehlen."""
-    self._update_current_mail_preview_and_attachments()
+    self._render_current_preview()
+    self._populate_attachment_preview()
     item = self._current_mail_record()
     if item.get("_primary_scan_source_type", "") == "mail_attachment" and self._pdf_attachment_rows(item):
       self.preview_tabs.setCurrentIndex(1)
@@ -3081,17 +3073,6 @@ class ScraperReviewWizardDialog(QDialog):
     self._update_mapping_state_ui()
     idx = self.current_index
     QTimer.singleShot(0, lambda idx=idx: self._auto_prompt_mapping_for_index(idx))
-
-  def _refresh_current_mail_navigation(self):
-    """Phase 5: Progress-Text, Mail-Banner, Nav-Dots, Footer-Stats aktualisieren."""
-    self._set_progress_text()
-    self._update_nav_dots()
-    self._update_footer_stats()
-
-  def _auto_enrich_current_mail(self):
-    """Phase 6: Auto-Lookups fuer Logo und Paketdienst ausfuehren."""
-    self._auto_lookup_shop_logo_from_db()
-    self._auto_detect_paketdienst()
 
   _CARRIER_PATTERNS = {
     "dhl": "DHL", "dpd": "DPD", "gls": "GLS",
