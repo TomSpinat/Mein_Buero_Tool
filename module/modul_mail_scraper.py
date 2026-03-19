@@ -48,16 +48,13 @@ from module.gemini_api import process_receipt_with_gemini
 from module.einkauf_pipeline import EinkaufPipeline
 from module.einkauf_ui import EinkaufHeadFormWidget, EinkaufItemsTableWidget, OrderReviewPanelWidget, SummenBannerWidget
 from module.shared_einkauf_review import (
-  populate_einkauf_widgets,
   collect_einkauf_payload,
   apply_einkauf_post_save,
   set_einkauf_review_data,
-  refresh_summen_banner,
   clear_einkauf_review_data,
-  collect_einkauf_warnings,
-  build_einkauf_checklist,
-  format_checklist_text,
   make_order_number_callback,
+  populate_einkauf_phase,
+  build_einkauf_status_report,
 )
 from module.normalization_dialog import NormalizationPanel
 from module.amazon_country_dialog import AmazonCountryPanel
@@ -2623,13 +2620,13 @@ class ScraperReviewWizardDialog(QDialog):
     if isinstance(payload, dict):
       merged.update(payload)
     self._set_current_mail_data(merged)
-    populate_einkauf_widgets(
+    populate_einkauf_phase(
       self.einkauf_form_widget,
       self.einkauf_items_widget,
+      self.summen_banner,
       merged,
       ean_callback=self.ean_service.find_best_local_ean_by_name,
     )
-    refresh_summen_banner(self.summen_banner, self.einkauf_items_widget, merged)
     self._refresh_order_review()
 
   def _clear_mapping_panel(self):
@@ -3506,19 +3503,19 @@ class ScraperReviewWizardDialog(QDialog):
       else:
         self.lbl_auto_mapping_log.setText("Keine automatischen Mappings.")
 
-      # Warnungen
-      items_list = self.einkauf_items_widget.get_items()
-      warnings = collect_einkauf_warnings(self.einkauf_form_widget, items_list, item)
-
+      # Warnungen + Validierungs-Checkliste via Status-Report-Phase
+      report = build_einkauf_status_report(
+        self.einkauf_form_widget,
+        self.einkauf_items_widget,
+        item,
+        extra_checks=[("Mapping erledigt", self._mapping_done_by_index.get(self.current_index, False))],
+      )
+      warnings = report["warnings"]
       self.lbl_warnings.setText("\n".join(warnings) if warnings else "Keine Warnungen.")
       self.lbl_warnings.setStyleSheet(
         f"font-size: 12px; color: {'#f7c66f' if warnings else '#a9b1d6'}; background-color: #1f2335; border: 1px solid #414868; border-radius: 6px; padding: 8px;"
       )
-
-      # Validierungs-Checkliste
-      checks = build_einkauf_checklist(self.einkauf_form_widget, items_list)
-      checks.append(("Mapping erledigt", self._mapping_done_by_index.get(self.current_index, False)))
-      self.lbl_validation_checklist.setText(format_checklist_text(checks))
+      self.lbl_validation_checklist.setText(report["checklist_text"])
 
     except Exception as e:
       log_exception(__name__, e)

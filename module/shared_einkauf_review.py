@@ -1,7 +1,9 @@
 """Gemeinsame Einkauf-Review-Helfer fuer Modul 1 (Order Entry) und Modul 2 (Mail Scraper).
 
-Stellt kleine stateless Funktionen bereit, die den Einkauf-Review-Pfad
+Stellt stateless Funktionen bereit, die den Einkauf-Review-Pfad
 zwischen beiden Modulen vereinheitlichen:
+
+Bausteine (Einzelhelfer):
 - Widget-Population (Payload → EinkaufHeadFormWidget + EinkaufItemsTableWidget)
 - Payload-Collection (Widgets → Payload)
 - Post-Save-Aktionen (Bildentscheidungen + Pending Matches)
@@ -12,6 +14,12 @@ zwischen beiden Modulen vereinheitlichen:
 - Save-Readiness-Pruefung und Checkliste
 - Order-Number-Callback-Factory
 - Widget-Reset
+
+Orchestrierungs-Phasen (komponieren mehrere Bausteine):
+- Post-Populate-Phase (populate_einkauf_phase)
+- Status-Report-Phase (build_einkauf_status_report)
+- Pre-Save-Phase (prepare_einkauf_save)
+- Reset-Phase (reset_einkauf_phase)
 """
 
 import logging
@@ -231,10 +239,10 @@ def validate_einkauf_waren(items):
   """
   issues = []
   if not items:
-    issues.append("Keine Artikelpositionen vorhanden")
+    issues.append("Keine Artikel vorhanden. Bitte mindestens eine Position hinzufuegen.")
     return issues
   if not any(str(it.get("produkt_name", "")).strip() for it in items):
-    issues.append("Mindestens eine Position muss einen Produktnamen haben")
+    issues.append("Mindestens eine Position muss einen Produktnamen haben.")
   return issues
 
 
@@ -428,3 +436,115 @@ def reset_einkauf_widgets(form_widget, items_widget):
     if hasattr(widget, "clear_suggestions"):
       widget.clear_suggestions()
   items_widget.clear_items()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Orchestrierungs-Phasen
+#
+# Groessere Funktionen, die mehrere Bausteine zu zusammengehoerenden
+# Review-Phasen kombinieren. Jede Phase kapselt eine logische Einheit
+# im Einkauf-Review-Lifecycle.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+# ── Phase: Post-Populate ────────────────────────────────────────────────────
+
+def populate_einkauf_phase(form_widget, items_widget, banner_widget, payload, ean_callback=None):
+  """Post-Populate-Phase: Widgets befuellen + Summen-Banner aktualisieren.
+
+  Kombiniert populate_einkauf_widgets() + refresh_summen_banner() als
+  zusammengehoerende Phase nach KI-Ergebnis oder Payload-Anwendung.
+  Beide Module fuehren diese beiden Schritte immer gemeinsam aus.
+
+  Args:
+    form_widget: EinkaufHeadFormWidget-Instanz.
+    items_widget: EinkaufItemsTableWidget-Instanz.
+    banner_widget: SummenBannerWidget-Instanz.
+    payload: dict mit Kopfdaten + 'waren'-Liste.
+    ean_callback: Optionaler Callback fuer lokale EAN-Aufloesung.
+  """
+  populate_einkauf_widgets(form_widget, items_widget, payload, ean_callback)
+  refresh_summen_banner(banner_widget, items_widget, payload)
+
+
+# ── Phase: Status-Report ────────────────────────────────────────────────────
+
+def build_einkauf_status_report(form_widget, items_widget, payload, extra_checks=None):
+  """Status-Report-Phase: Warnungen + Checkliste + Save-Readiness buendeln.
+
+  Kombiniert collect_einkauf_warnings(), build_einkauf_checklist(),
+  format_checklist_text() und check_einkauf_save_ready() zu einem
+  einzigen Aufruf fuer Status-Anzeigen und Uebersichts-Tabs.
+
+  Args:
+    form_widget: EinkaufHeadFormWidget-Instanz.
+    items_widget: EinkaufItemsTableWidget-Instanz.
+    payload: Payload-Dict mit optionalem 'gesamt_ekp_brutto'.
+    extra_checks: Optionale Liste von (Label, ist_ok) Tupeln,
+        die an die Checkliste angehaengt werden.
+
+  Returns:
+    dict:
+      'warnings': list[str] — Warnungstexte.
+      'checklist': list[tuple[str, bool]] — Checklisten-Eintraege.
+      'checklist_text': str — Formatierte Checkliste mit Haekchen/Kreuzen.
+      'save_ready': bool — True wenn Mindestanforderungen erfuellt.
+  """
+  items = items_widget.get_items()
+  warnings = collect_einkauf_warnings(form_widget, items, payload)
+  checklist = build_einkauf_checklist(form_widget, items)
+  if extra_checks:
+    checklist.extend(extra_checks)
+  save_ready = check_einkauf_save_ready(form_widget, items_widget)
+  return {
+    "warnings": warnings,
+    "checklist": checklist,
+    "checklist_text": format_checklist_text(checklist),
+    "save_ready": save_ready,
+  }
+
+
+# ── Phase: Pre-Save ────────────────────────────────────────────────────────
+
+def prepare_einkauf_save(form_widget, items_widget, base_payload=None):
+  """Pre-Save-Phase: Payload sammeln + Artikel validieren.
+
+  Kombiniert collect_einkauf_payload() + validate_einkauf_waren() als
+  zusammengehoerende Vorbereitung vor dem eigentlichen Save.
+  Der Aufrufer entscheidet, wie Validierungsprobleme angezeigt werden.
+
+  Args:
+    form_widget: EinkaufHeadFormWidget-Instanz.
+    items_widget: EinkaufItemsTableWidget-Instanz.
+    base_payload: Optionaler Basis-Payload (wird nicht mutiert).
+
+  Returns:
+    tuple[dict, list[str]]:
+      - Payload-Dict mit Kopfdaten + 'waren'-Liste.
+      - Liste von Validierungsproblemen (leer wenn OK).
+  """
+  payload = collect_einkauf_payload(form_widget, items_widget, base_payload)
+  issues = validate_einkauf_waren(payload.get("waren", []))
+  return payload, issues
+
+
+# ── Phase: Reset ────────────────────────────────────────────────────────────
+
+def reset_einkauf_phase(form_widget, items_widget, banner_widget=None, clear_review=False):
+  """Reset-Phase: Einkauf-Widgets + Banner + optional Review-Daten zuruecksetzen.
+
+  Kombiniert reset_einkauf_widgets() + Banner-Hide + optional
+  clear_einkauf_review_data() als zusammengehoerende Reset-Phase
+  nach erfolgreichem Speichern oder beim Moduswechsel.
+
+  Args:
+    form_widget: EinkaufHeadFormWidget-Instanz.
+    items_widget: EinkaufItemsTableWidget-Instanz.
+    banner_widget: Optionales SummenBannerWidget (wird versteckt wenn angegeben).
+    clear_review: Wenn True, werden auch Review-Hervorhebungen entfernt.
+  """
+  reset_einkauf_widgets(form_widget, items_widget)
+  if banner_widget is not None:
+    banner_widget.setVisible(False)
+  if clear_review:
+    clear_einkauf_review_data(form_widget, items_widget)

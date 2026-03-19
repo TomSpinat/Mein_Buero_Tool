@@ -35,14 +35,14 @@ from module.media.media_grid_selection_dialog import MediaGridSelectionDialog
 from module.media.media_service import MediaService
 
 from module.shared_einkauf_review import (
-    populate_einkauf_widgets,
-    collect_einkauf_payload,
     apply_einkauf_post_save,
     set_einkauf_review_data,
     refresh_summen_banner,
     check_einkauf_save_ready,
     make_order_number_callback,
-    reset_einkauf_widgets,
+    populate_einkauf_phase,
+    prepare_einkauf_save,
+    reset_einkauf_phase,
 )
 from module.shared_search_workflows import (
     create_logo_search_worker,
@@ -691,19 +691,20 @@ class OrderEntryApp(QWidget):
     def _fill_ui(self):
         """Füllt das GUI aus dem current_gemini_data Dictionary."""
         if self.scan_mode == "einkauf":
-            self._fill_einkauf_ui()
+            self._fill_einkauf_ui()  # inkl. Summen-Banner via populate_einkauf_phase
         else:
             self._fill_verkauf_ui()
+            self._update_summen_banner()
 
-        self._update_summen_banner()
         self._update_save_button_state()
         self._trigger_post_fill_lookups()
 
     def _fill_einkauf_ui(self):
-        """Einkauf-Pfad: Kopfdaten + Artikel ueber EinkaufHeadFormWidget / EinkaufItemsTableWidget befuellen."""
-        populate_einkauf_widgets(
+        """Einkauf-Pfad: Kopfdaten + Artikel + Summen-Banner ueber Shared-Phase befuellen."""
+        populate_einkauf_phase(
             self.einkauf_form_widget,
             self.einkauf_items_widget,
+            self.summen_banner,
             self.current_gemini_data,
             ean_callback=self.ean_service.find_best_local_ean_by_name,
         )
@@ -1319,8 +1320,8 @@ class OrderEntryApp(QWidget):
         self._pending_image_search_context = None
 
     def _reset_einkauf_state(self):
-        """Einkauf-Pfad: Kopfdaten-Widget + Artikel-Widget leeren."""
-        reset_einkauf_widgets(self.einkauf_form_widget, self.einkauf_items_widget)
+        """Einkauf-Pfad: Kopfdaten-Widget + Artikel-Widget + Banner leeren."""
+        reset_einkauf_phase(self.einkauf_form_widget, self.einkauf_items_widget, self.summen_banner)
 
     def _reset_verkauf_state(self):
         """Verkauf-Pfad (Legacy): QLineEdits + QTableWidget leeren."""
@@ -1339,20 +1340,14 @@ class OrderEntryApp(QWidget):
 
     def _save_einkauf(self):
         """Einkauf-Pfad: Payload aus Widgets aufbauen, Pipeline-Save, Bild-Decisions, Matching."""
-        # Payload aus Widgets sammeln
-        self.current_gemini_data = collect_einkauf_payload(
+        # Pre-Save-Phase: Payload sammeln + Waren validieren
+        self.current_gemini_data, issues = prepare_einkauf_save(
             self.einkauf_form_widget,
             self.einkauf_items_widget,
             self.current_gemini_data,
         )
-
-        # Waren validieren
-        waren_liste = self.current_gemini_data.get("waren", [])
-        if not waren_liste:
-            CustomMsgBox.warning(self, "Validierung", "Keine Artikel vorhanden. Bitte mindestens eine Position hinzufuegen.")
-            return
-        if not any(str(it.get("produkt_name", "")).strip() for it in waren_liste):
-            CustomMsgBox.warning(self, "Validierung", "Mindestens eine Position muss einen Produktnamen haben.")
+        if issues:
+            CustomMsgBox.warning(self, "Validierung", issues[0])
             return
 
         try:
