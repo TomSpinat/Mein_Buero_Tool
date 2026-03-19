@@ -1985,7 +1985,6 @@ class ScraperReviewWizardDialog(QDialog):
     self._mapping_prompted_by_index = {}
     self._mapping_state_by_index = {}
     self._active_mapping_panel = None
-    self._current_order_review_bundle = None
     self._current_einkauf_report = None
     self._current_rechnung_pdf_path = ""
     self.summary = {
@@ -2632,7 +2631,6 @@ class ScraperReviewWizardDialog(QDialog):
       extra_checks=[("Mapping erledigt", self._mapping_done_by_index.get(self.current_index, False))],
     )
     self._shared_db = result["db"]
-    self._current_order_review_bundle = result["review_bundle"]
     self._current_einkauf_report = result["report"]
     return result
 
@@ -3049,22 +3047,23 @@ class ScraperReviewWizardDialog(QDialog):
       7. Detail-Sektionen (Uebersicht, Rechnung)
       8. Tab-Reset
     """
-    self._prepare_current_mail_payload()
+    item = self._current_mail_record()
+    state = self._ensure_mapping_state_for_index(
+      self.current_index,
+      rebuild=False,
+      source_payload=item,
+    )
+    self._apply_payload_to_current_mail(state.get("payload", {}))
     self._refresh_current_mail_preview()
     self._refresh_current_mail_mapping_panel()
     self._update_current_mail_badges()
     self._refresh_current_mail_navigation()
     self._auto_enrich_current_mail()
-    self._refresh_current_mail_detail_sections()
+    self._update_uebersicht_tab()
+    self._update_rechnung_section()
     self.data_tabs.setCurrentIndex(0)
 
   # ── Lade-Phasen (intern) ──────────────────────────────────────
-
-  def _prepare_current_mail_payload(self):
-    """Phase 1: Mapping-State sichern, Payload in Form + Items + Review anwenden."""
-    item = self._current_mail_record()
-    state = self._ensure_mapping_state_for_index(self.current_index, rebuild=False, source_payload=item)
-    self._apply_payload_to_current_mail(state.get("payload", {}))
 
   def _refresh_current_mail_preview(self):
     """Phase 2: Preview + Anhaenge rendern, passenden Preview-Tab waehlen."""
@@ -3093,11 +3092,6 @@ class ScraperReviewWizardDialog(QDialog):
     """Phase 6: Auto-Lookups fuer Logo und Paketdienst ausfuehren."""
     self._auto_lookup_shop_logo_from_db()
     self._auto_detect_paketdienst()
-
-  def _refresh_current_mail_detail_sections(self):
-    """Phase 7: Uebersicht-Tab und Rechnungs-Sektion aktualisieren."""
-    self._update_uebersicht_tab()
-    self._update_rechnung_section()
 
   _CARRIER_PATTERNS = {
     "dhl": "DHL", "dpd": "DPD", "gls": "GLS",
@@ -3512,7 +3506,19 @@ class ScraperReviewWizardDialog(QDialog):
         return
 
       # 2. Payload zusammenstellen + zurueckschreiben
-      payload = self._build_save_payload()
+      payload = collect_einkauf_payload(
+        self.einkauf_form_widget,
+        self.einkauf_items_widget,
+        self._current_mail_record(),
+      )
+      item = self._current_mail_record()
+      payload["quelle"] = "mail_scraper"
+      payload["mail_uid"] = str(item.get("_mail_uid", "") or "").strip()
+      payload["mail_account"] = str(item.get("_mail_account", "") or "").strip()
+      if self.chk_rechnung_vorhanden.isChecked():
+        payload["rechnung_vorhanden"] = True
+        if self._current_rechnung_pdf_path:
+          payload["rechnung_pdf_pfad"] = self._current_rechnung_pdf_path
       apply_result = self._apply_payload_to_current_mail(payload)
 
       # 3. Save-Workflow: Apply + Save + Post-Save
@@ -3582,23 +3588,6 @@ class ScraperReviewWizardDialog(QDialog):
     self._mail_status[self.current_index] = status
     if status in self.summary:
       self.summary[status] += 1
-
-  def _build_save_payload(self):
-    """Baut den vollstaendigen Save-Payload fuer die aktuelle Mail."""
-    payload = collect_einkauf_payload(
-      self.einkauf_form_widget,
-      self.einkauf_items_widget,
-      self._current_mail_record(),
-    )
-    item = self._current_mail_record()
-    payload["quelle"] = "mail_scraper"
-    payload["mail_uid"] = str(item.get("_mail_uid", "") or "").strip()
-    payload["mail_account"] = str(item.get("_mail_account", "") or "").strip()
-    if self.chk_rechnung_vorhanden.isChecked():
-      payload["rechnung_vorhanden"] = True
-      if self._current_rechnung_pdf_path:
-        payload["rechnung_pdf_pfad"] = self._current_rechnung_pdf_path
-    return payload
 
   def _find_next_pending_index(self):
     """Sucht den naechsten 'pending' Index (vorwaerts, dann rueckwaerts). Gibt -1 zurueck wenn keiner."""
