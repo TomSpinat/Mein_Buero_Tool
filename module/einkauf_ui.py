@@ -1143,7 +1143,6 @@ class EinkaufHeadFormWidget(QWidget):
         extra_layout.addLayout(self.extra_form_layout)
         self.extra_frame.setVisible(False)
         layout.addWidget(self.extra_frame)
-        layout.addStretch()
 
     def _show_shop_placeholder(self):
         """Zeigt den Logo-Frame mit Platzhalter-Inhalt (wird im 'direct'-Modus genutzt)."""

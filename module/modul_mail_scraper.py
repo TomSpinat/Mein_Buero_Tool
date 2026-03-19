@@ -8,7 +8,7 @@ oder wichtigen Textinhalte und leitet sie an die Gemini-Erkennung weiter.
 from PyQt6.QtWidgets import (
   QWidget, QVBoxLayout, QHBoxLayout, QLabel,
   QPushButton, QListWidget, QListWidgetItem, QFrame,
-  QMessageBox, QProgressBar, QApplication, QDialog,
+  QMessageBox, QApplication, QDialog,
   QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox,
   QComboBox, QLineEdit, QSizePolicy, QFormLayout, QTabWidget, QScrollArea, QSplitter
 )
@@ -22,8 +22,8 @@ except Exception:
   QPdfDocument = None
   QPdfView = None
   QT_PDF_AVAILABLE = False
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl, QTimer, QSize
-from PyQt6.QtGui import QIcon, QPixmap
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl, QTimer, QSize, QRectF, QPointF, QPoint
+from PyQt6.QtGui import QIcon, QPixmap, QColor, QPainter, QPen, QTransform, QFont
 import base64
 import mimetypes
 import imaplib
@@ -43,6 +43,7 @@ import sys
 import socket
 import ssl
 import threading
+import random
 
 from module.background_tasks import BackgroundTask
 from module.ai import build_provider_profile
@@ -82,6 +83,7 @@ from module.shop_logo_search_worker import ShopLogoSearchWorker
 from module.media.media_grid_selection_dialog import MediaGridSelectionDialog
 from module.media.media_service import MediaService
 from module.media.media_store import LocalMediaStore
+from module.smooth_progress import SmoothProgressController
 from module.shared_search_workflows import (
     create_logo_search_worker,
     reset_logo_search_button,
@@ -92,6 +94,311 @@ from module.shared_search_workflows import (
     handle_ean_lookup_result,
     handle_ean_lookup_error,
 )
+
+MAIL_SCAN_PROGRESS_SEGMENTS = {
+  "fetch": (0.00, 0.22),
+  "planning": (0.22, 0.32),
+  "prepare": (0.32, 0.52),
+  "cloudscan": (0.52, 0.96),
+}
+
+
+def _mail_progress_car_image_path():
+  project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+  assets_dir = os.path.join(project_root, "assets")
+  candidates = (
+    os.path.join(assets_dir, "mail_progress_car.png"),
+    os.path.join(assets_dir, "Audi_SkyrrSkyrr.png"),
+    os.path.join(assets_dir, "Audi_skyrr.png"),
+    os.path.join(project_root, "Audi_SkyrrSkyrr.png"),
+    os.path.join(project_root, "Audi_skyrr.png"),
+    os.path.join(project_root, "audi_skyrr.png"),
+  )
+  for path in candidates:
+    if os.path.exists(path):
+      return path
+  return ""
+
+
+class MailProgressCarWidget(QWidget):
+  overlay_changed = pyqtSignal()
+
+  def __init__(self, parent=None, image_path=""):
+    super().__init__(parent)
+    self._minimum = 0.0
+    self._maximum = 1.0
+    self._value = 0.0
+    self._text_visible = False
+    self._image_path = str(image_path or "").strip()
+    self._base_pixmap = self._load_car_pixmap(self._image_path)
+    self._animation_fraction = 0.0
+    self._lyric_particles = []
+    self._car_anchor_point = QPointF(64.0, 28.0)
+    self._animation_timer = QTimer(self)
+    self._animation_timer.setInterval(28)
+    self._animation_timer.timeout.connect(self._advance_animation)
+    self._lyric_timer = QTimer(self)
+    self._lyric_timer.setSingleShot(True)
+    self._lyric_timer.timeout.connect(self._emit_lyric_particle)
+    self.setMinimumHeight(78)
+
+  def setTextVisible(self, visible):
+    self._text_visible = bool(visible)
+
+  def setRange(self, minimum, maximum):
+    self._minimum = float(minimum)
+    self._maximum = float(maximum)
+    if not self._is_indeterminate():
+      self._value = max(self._minimum, min(self._value, self._maximum))
+    self._sync_animation()
+    self.overlay_changed.emit()
+    self.update()
+
+  def setValue(self, value):
+    self._value = float(value)
+    self.overlay_changed.emit()
+    self.update()
+
+  def showEvent(self, event):
+    super().showEvent(event)
+    self._schedule_next_lyric_burst()
+    self._sync_animation()
+    self.overlay_changed.emit()
+
+  def hideEvent(self, event):
+    self._animation_timer.stop()
+    self._lyric_timer.stop()
+    self._lyric_particles.clear()
+    self.overlay_changed.emit()
+    super().hideEvent(event)
+
+  def paintEvent(self, event):
+    super().paintEvent(event)
+    painter = QPainter(self)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+    car_pixmap = self._scaled_car_pixmap()
+
+    bar_margin_x = 20.0
+    bar_height = 14.0
+    bar_rect = QRectF(
+      bar_margin_x,
+      (float(self.height()) - bar_height) / 2.0,
+      max(24.0, float(self.width()) - (bar_margin_x * 2.0)),
+      bar_height,
+    )
+    radius = bar_height / 2.0
+
+    if not car_pixmap.isNull():
+      anchor_ratio = 0.22
+      fill_front_x = bar_rect.left() + self._fill_width(bar_rect.width())
+      car_x = fill_front_x - (car_pixmap.width() * anchor_ratio)
+      min_x = bar_rect.left() - (car_pixmap.width() * 0.10)
+      max_x = bar_rect.right() - (car_pixmap.width() * anchor_ratio)
+      car_x = max(min_x, min(car_x, max_x))
+      car_y = (float(self.height()) - car_pixmap.height()) / 2.0
+      trail_end_x = car_x + (car_pixmap.width() * anchor_ratio)
+      self._car_anchor_point = QPointF(car_x + (car_pixmap.width() * 0.42), car_y + (car_pixmap.height() * 0.10))
+
+      track_rect = QRectF(
+        bar_rect.left(),
+        bar_rect.top(),
+        max(0.0, trail_end_x - bar_rect.left()),
+        bar_rect.height(),
+      )
+      if track_rect.width() > 0:
+        painter.setPen(QPen(QColor("#304160"), 1))
+        painter.setBrush(QColor("#0F172A"))
+        painter.drawRoundedRect(track_rect, radius, radius)
+
+      fill_rect = QRectF(
+        bar_rect.left(),
+        bar_rect.top(),
+        max(0.0, min(trail_end_x - bar_rect.left(), self._fill_width(bar_rect.width()))),
+        bar_rect.height(),
+      )
+      if fill_rect.width() > 0:
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#00E4FF"))
+        painter.drawRoundedRect(fill_rect, radius, radius)
+
+      shadow_rect = QRectF(
+        car_x + (car_pixmap.width() * 0.16),
+        bar_rect.center().y() + 7.0,
+        car_pixmap.width() * 0.50,
+        6.0,
+      )
+      painter.setBrush(QColor(0, 0, 0, 70))
+      painter.setPen(Qt.PenStyle.NoPen)
+      painter.drawRoundedRect(shadow_rect, 3.0, 3.0)
+      painter.drawPixmap(int(round(car_x)), int(round(car_y)), car_pixmap)
+    else:
+      painter.setPen(QPen(QColor("#304160"), 1))
+      painter.setBrush(QColor("#0F172A"))
+      painter.drawRoundedRect(bar_rect, radius, radius)
+      fill_width = self._fill_width(bar_rect.width())
+      if fill_width > 0:
+        fill_rect = QRectF(bar_rect.left(), bar_rect.top(), fill_width, bar_rect.height())
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#00E4FF"))
+        painter.drawRoundedRect(fill_rect, radius, radius)
+
+  def _load_car_pixmap(self, image_path):
+    if not image_path or not os.path.exists(image_path):
+      return QPixmap()
+    source = QPixmap(image_path)
+    if source.isNull():
+      return QPixmap()
+    return source.transformed(QTransform().scale(-1, 1), Qt.TransformationMode.SmoothTransformation)
+
+  def _scaled_car_pixmap(self):
+    if self._base_pixmap.isNull():
+      return QPixmap()
+    target_height = max(42, min(84, self.height() - 4))
+    return self._base_pixmap.scaledToHeight(target_height, Qt.TransformationMode.SmoothTransformation)
+
+  def _is_indeterminate(self):
+    return self._minimum == 0 and self._maximum == 0
+
+  def _advance_animation(self):
+    self._animation_fraction = (self._animation_fraction + 0.018) % 1.08
+    if self._lyric_particles:
+      tick_ms = max(12, int(self._animation_timer.interval() or 28))
+      updated_particles = []
+      for particle in self._lyric_particles:
+        particle["age_ms"] = int(particle.get("age_ms", 0) or 0) + tick_ms
+        if particle["age_ms"] < int(particle.get("duration_ms", 0) or 0):
+          updated_particles.append(particle)
+      self._lyric_particles = updated_particles
+    self.overlay_changed.emit()
+    self.update()
+    self._sync_animation()
+
+  def _sync_animation(self):
+    if self.isVisible() and (self._is_indeterminate() or bool(self._lyric_particles)):
+      if not self._animation_timer.isActive():
+        self._animation_timer.start()
+    else:
+      self._animation_timer.stop()
+
+  def _fill_width(self, total_width):
+    total_width = max(0.0, float(total_width))
+    if total_width <= 0:
+      return 0.0
+    if self._is_indeterminate():
+      min_width = max(34.0, total_width * 0.14)
+      travel = max(0.0, total_width - min_width)
+      return min_width + (travel * self._animation_fraction)
+    span = float(self._maximum - self._minimum)
+    if span <= 0:
+      return 0.0
+    progress = (float(self._value) - float(self._minimum)) / span
+    progress = max(0.0, min(progress, 1.0))
+    return max(0.0, total_width * progress)
+
+  def _schedule_next_lyric_burst(self):
+    if not self.isVisible():
+      return
+    self._lyric_timer.start(random.randint(3000, 7000))
+
+  def _emit_lyric_particle(self):
+    if not self.isVisible():
+      return
+    origin = QPointF(self._car_anchor_point)
+    burst_duration = random.randint(1800, 2400)
+    self._lyric_particles.extend(
+      [
+        {
+          "text": "SKRR",
+          "x": float(origin.x()) - 8.0,
+          "y": float(origin.y()) + 1.5,
+          "age_ms": 0,
+          "duration_ms": burst_duration,
+          "rise_px": random.uniform(18.0, 26.0),
+          "drift_x": random.uniform(10.0, 18.0),
+          "sway": random.uniform(1.5, 4.0),
+        },
+        {
+          "text": "SKRR",
+          "x": float(origin.x()) + 7.0,
+          "y": float(origin.y()) - 6.0,
+          "age_ms": 180,
+          "duration_ms": burst_duration,
+          "rise_px": random.uniform(22.0, 30.0),
+          "drift_x": random.uniform(14.0, 22.0),
+          "sway": random.uniform(2.0, 4.5),
+        },
+      ]
+    )
+    self._schedule_next_lyric_burst()
+    self._sync_animation()
+    self.overlay_changed.emit()
+    self.update()
+
+  def lyric_particles(self):
+    return [dict(particle) for particle in self._lyric_particles]
+
+
+class MailProgressLyricOverlay(QWidget):
+  def __init__(self, progress_widget, parent=None):
+    super().__init__(parent)
+    self._progress_widget = progress_widget
+    self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+    self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+    self.setStyleSheet("background: transparent;")
+    self.hide()
+
+  def sync_geometry(self):
+    parent_widget = self.parentWidget()
+    if parent_widget is None:
+      return
+    self.setGeometry(parent_widget.rect())
+    self.raise_()
+
+  def paintEvent(self, event):
+    super().paintEvent(event)
+    if self._progress_widget is None or not self._progress_widget.isVisible():
+      return
+
+    particles = self._progress_widget.lyric_particles()
+    if not particles:
+      return
+
+    painter = QPainter(self)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+    base_font = QFont("Comic Sans MS", 5)
+    base_font.setBold(True)
+    try:
+      base_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.4)
+    except Exception:
+      pass
+    painter.setFont(base_font)
+
+    for particle in particles:
+      duration_ms = max(1, int(particle.get("duration_ms", 0) or 1))
+      age_ms = max(0, int(particle.get("age_ms", 0) or 0))
+      progress = max(0.0, min(float(age_ms) / float(duration_ms), 1.0))
+      fade = 1.0 - progress
+      rise_offset = float(particle.get("rise_px", 24.0) or 24.0) * progress
+      drift_x = float(particle.get("drift_x", 0.0) or 0.0) * progress
+      sway = float(particle.get("sway", 0.0) or 0.0) * (1.0 - progress) * (1.0 if progress < 0.5 else -1.0)
+      text = str(particle.get("text", "SKRR") or "SKRR")
+
+      source_global = self._progress_widget.mapToGlobal(
+        QPoint(int(round(float(particle.get("x", 0.0) or 0.0))), int(round(float(particle.get("y", 0.0) or 0.0))))
+      )
+      source_local = self.mapFromGlobal(source_global)
+      text_x = float(source_local.x()) + drift_x + sway
+      text_y = float(source_local.y()) - rise_offset - 2.0
+
+      painter.setOpacity(max(0.0, min(1.0, fade)))
+      painter.setPen(QPen(QColor("#231942"), 2))
+      painter.drawText(int(round(text_x - 1.0)), int(round(text_y)), text)
+      painter.setPen(QColor("#FFE066"))
+      painter.drawText(int(round(text_x)), int(round(text_y)), text)
+      painter.setPen(QColor("#FF8C42"))
+      painter.drawText(int(round(text_x + 1.0)), int(round(text_y - 1.0)), text)
 
 
 class AddAccountDialog(QDialog):
@@ -482,6 +789,7 @@ class MailScraperApp(QWidget):
     self._active_scan_api_key = ""
     self._active_scan_profile_name = ""
     self._active_scan_profile_overrides = {}
+    self._smooth_progress = SmoothProgressController(self)
 
     self.main_layout = QVBoxLayout(self)
 
@@ -610,16 +918,17 @@ class MailScraperApp(QWidget):
     self.lbl_busy_state.setVisible(False)
     status_layout.addWidget(self.lbl_busy_state)
 
-    self.progress_bar = QProgressBar()
+    self.progress_bar = MailProgressCarWidget(self, image_path=_mail_progress_car_image_path())
     self.progress_bar.setVisible(False)
     self.progress_bar.setTextVisible(False)
-    self.progress_bar.setFixedHeight(12)
-    self.progress_bar.setStyleSheet(
-      "QProgressBar { background-color: #0F172A; border: 1px solid #304160; border-radius: 6px; }"
-      "QProgressBar::chunk { background-color: #00E4FF; border-radius: 6px; }"
-    )
+    self.progress_bar.setFixedHeight(78)
+    self._bind_smooth_progress_controller()
     status_layout.addWidget(self.progress_bar)
     self.main_layout.addWidget(status_frame)
+
+    self.progress_lyric_overlay = MailProgressLyricOverlay(self.progress_bar, self)
+    self.progress_lyric_overlay.sync_geometry()
+    self.progress_bar.overlay_changed.connect(self._refresh_progress_lyric_overlay)
 
     log_frame = QFrame(self)
     log_frame.setStyleSheet("QFrame { background-color: #12182A; border: 1px solid #222C45; border-radius: 18px; }")
@@ -662,6 +971,63 @@ class MailScraperApp(QWidget):
     if hasattr(self, "pipeline_dashboard") and self.pipeline_dashboard is not None:
       if text:
         self.pipeline_dashboard.set_status_text(text)
+
+  def _bind_smooth_progress_controller(self):
+    self._smooth_progress.progress_changed.connect(self._apply_smoothed_progress_value)
+    self._smooth_progress.indeterminate_changed.connect(self._apply_smoothed_progress_mode)
+    self._smooth_progress.visibility_changed.connect(self.progress_bar.setVisible)
+    self._smooth_progress.phase_text_changed.connect(self._set_busy_hint)
+    self._apply_smoothed_progress_mode(False)
+    self._apply_smoothed_progress_value(0.0)
+
+  def _apply_smoothed_progress_mode(self, indeterminate):
+    if bool(indeterminate):
+      self.progress_bar.setRange(0.0, 0.0)
+    else:
+      self.progress_bar.setRange(0.0, 1.0)
+
+  def _apply_smoothed_progress_value(self, progress):
+    self.progress_bar.setValue(float(progress or 0.0))
+    self._refresh_progress_lyric_overlay()
+
+  def _refresh_progress_lyric_overlay(self):
+    if not hasattr(self, "progress_lyric_overlay") or self.progress_lyric_overlay is None:
+      return
+    self.progress_lyric_overlay.sync_geometry()
+    has_particles = bool(self.progress_bar.lyric_particles()) if hasattr(self.progress_bar, "lyric_particles") else False
+    should_show = bool(self.progress_bar.isVisible() and has_particles)
+    self.progress_lyric_overlay.setVisible(should_show)
+    if should_show:
+      self.progress_lyric_overlay.raise_()
+      self.progress_lyric_overlay.update()
+
+  def _reset_progress_ui(self, phase_text=""):
+    self._smooth_progress.reset(progress=0.0, visible=False, phase_text=phase_text)
+
+  def _show_indeterminate_progress(self, phase_text=None):
+    self._smooth_progress.show_indeterminate(phase_text=phase_text, visible=True)
+
+  def _hide_progress(self, clear_phase_text=False):
+    self._smooth_progress.hide(clear_phase_text=clear_phase_text, reset_progress=True)
+
+  def _finish_progress(self, phase_text=None):
+    self._smooth_progress.finish(phase_text=phase_text, hide_after_ms=180)
+
+  def _update_progress_phase_text(self, phase_text):
+    self._smooth_progress.set_phase_text(phase_text)
+
+  def _set_scan_progress_phase(self, phase_key, current=0, total=0, phase_text=None):
+    start_value, end_value = MAIL_SCAN_PROGRESS_SEGMENTS.get(str(phase_key or "").strip().lower(), (0.0, 0.95))
+    total_value = max(0, int(total or 0))
+    if total_value <= 0:
+      self._show_indeterminate_progress(phase_text=phase_text)
+      return None
+
+    current_value = max(0, min(int(current or 0), total_value))
+    fraction = float(current_value) / float(total_value)
+    target_progress = start_value + ((end_value - start_value) * fraction)
+    self._smooth_progress.set_target_progress(target_progress, phase_text=phase_text, visible=True)
+    return target_progress
 
   def _mail_pipeline_icon_paths(self):
     base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "icons"))
@@ -930,18 +1296,16 @@ class MailScraperApp(QWidget):
     completed = int(payload.get("completed", 0) or 0)
     phase = str(payload.get("phase", payload.get("state", "")) or "").lower()
     render_finished = bool(payload.get("render_finished", False))
+    status_hint = str(payload.get("status_text", "") or "").strip()
 
     if total and render_finished:
       in_flight = int(payload.get("active_workers", 0) or 0)
       progress_value = min(total, completed + in_flight)
-      self.progress_bar.setVisible(True)
-      self.progress_bar.setRange(0, total)
-      self.progress_bar.setValue(progress_value)
+      self._set_scan_progress_phase("cloudscan", progress_value, total, phase_text=status_hint or None)
       self.pipeline_dashboard.set_stage("cloudscan", min(1.0, float(progress_value) / float(total)))
 
-    status_hint = str(payload.get("status_text", "") or "").strip()
     if status_hint:
-      self._set_busy_hint(status_hint)
+      self._update_progress_phase_text(status_hint)
       self.pipeline_dashboard.set_status_text(status_hint)
       raw_payload["_ui_runtime_status_text"] = status_hint
 
@@ -1070,9 +1434,8 @@ class MailScraperApp(QWidget):
     self.account_combo.setEnabled(False)
     self.btn_scan.setEnabled(False)
     self.btn_connect.setText("Verbinde...")
-    self.progress_bar.setVisible(True)
-    self.progress_bar.setRange(0, 0)
-    self._set_busy_hint("Serververbindung wird geprueft...")
+    self._reset_progress_ui()
+    self._show_indeterminate_progress("Serververbindung wird geprueft...")
 
     self._connect_task = BackgroundTask(
       _run_imap_connection_check,
@@ -1100,7 +1463,7 @@ class MailScraperApp(QWidget):
       text = str(payload or "").strip()
 
     if text:
-      self._set_busy_hint(text)
+      self._show_indeterminate_progress(text)
 
   def _on_connection_result(self, task_id, result):
     if task_id != self._connect_task_id:
@@ -1145,8 +1508,7 @@ class MailScraperApp(QWidget):
     self.btn_add_account.setEnabled(True)
     self.account_combo.setEnabled(True)
     self.btn_connect.setText("Verbindung erneuern")
-    self.progress_bar.setVisible(False)
-    self._set_busy_hint("")
+    self._hide_progress(clear_phase_text=True)
 
   def _start_scan(self):
     host, port, user, pwd, last_uid = self._get_imap_settings()
@@ -1187,12 +1549,11 @@ class MailScraperApp(QWidget):
     self._log(f"Starte Suchvorgang nach neuen E-Mail Belegen mit {provider_label}...")
     self.btn_scan.setEnabled(False)
     self.btn_connect.setEnabled(False)
-    self.progress_bar.setVisible(True)
-    self.progress_bar.setRange(0, 0)
+    self._reset_progress_ui()
     self._reset_pipeline_visuals("Postfachscan startet. Neue Mails erscheinen direkt als Karten.")
+    self._show_indeterminate_progress("Postfach wird gelesen...")
     self.pipeline_dashboard.set_stage("scan", 0.0)
     self._update_pipeline_monitoring(self._ensure_quota_governor().snapshot())
-    self._set_busy_hint("Postfach wird gelesen...")
 
     if "Alle seit" in limit_text:
       mail_limit = "SINCE_LAST"
@@ -1213,22 +1574,17 @@ class MailScraperApp(QWidget):
     self.scraper_thread.start()
 
   def _update_progress(self, current, total):
-    self.progress_bar.setRange(0, total)
-    self.progress_bar.setValue(current)
     if total:
+      self._set_scan_progress_phase("fetch", current, total, phase_text=f"Postfach wird gelesen... ({current}/{total})")
       self.pipeline_dashboard.set_stage("scan", min(1.0, float(current) / float(total)))
-      self._set_busy_hint(f"Postfach wird gelesen... ({current}/{total})")
 
   def _begin_screenshot_rendering(self, raw_emails):
     self._cleanup_render_job()
     if self._scan_coordinator is not None:
       self._scan_coordinator.set_expected_total(len(raw_emails))
     self._log(f"Rendere {len(raw_emails)} E-Mail(s) als Screenshot fuer die KI...")
-    self.progress_bar.setVisible(True)
-    self.progress_bar.setRange(0, len(raw_emails))
-    self.progress_bar.setValue(0)
+    self._set_scan_progress_phase("prepare", 0, len(raw_emails), phase_text="E-Mails werden fuer die KI vorbereitet...")
     self.pipeline_dashboard.set_stage("screenshots", 0.0)
-    self._set_busy_hint("E-Mails werden fuer die KI vorbereitet...")
 
     self._render_job = MailScreenshotRenderJob(
       self._active_scan_session_id,
@@ -1245,7 +1601,8 @@ class MailScraperApp(QWidget):
     planned_for_render = []
     direct_count = 0
 
-    for raw_email in list(raw_emails or []):
+    total_emails = len(list(raw_emails or []))
+    for idx, raw_email in enumerate(list(raw_emails or []), start=1):
       raw_email = dict(raw_email or {})
       mail_key = str(raw_email.get("_pipeline_card_key", "") or "")
       preplan = build_mail_scan_preplan(
@@ -1274,6 +1631,14 @@ class MailScraperApp(QWidget):
       plan_text = str(preplan.status_text or preplan.status_label or preplan.input_category or "").strip()
       if plan_text:
         self._log(f"Vorplanung: {subject} -> {plan_text}")
+
+      if total_emails > 0:
+        self._set_scan_progress_phase(
+          "planning",
+          idx,
+          total_emails,
+          phase_text=f"Scan-Eingaenge werden vorbereitet... ({idx}/{total_emails})",
+        )
 
       if preplan.requires_screenshot:
         planned_for_render.append(raw_email)
@@ -1379,6 +1744,7 @@ class MailScraperApp(QWidget):
     payload = payload if isinstance(payload, dict) else {}
     status_text = str(payload.get("status_text", "") or "").strip()
     if status_text:
+      self._update_progress_phase_text(status_text)
       self.pipeline_dashboard.set_status_text(status_text)
       self._set_busy_hint(status_text)
       self._log(status_text)
@@ -1398,12 +1764,11 @@ class MailScraperApp(QWidget):
     total = int(payload.get("total", 0) or 0)
     current = int(payload.get("current", 0) or 0)
     if total:
-      self.progress_bar.setRange(0, total)
-      self.progress_bar.setValue(current)
+      self._set_scan_progress_phase("prepare", current, total)
       self.pipeline_dashboard.set_stage("screenshots", min(1.0, float(current) / float(total)))
     status_text = str(payload.get("status_text", "") or "").strip()
     if status_text:
-      self._set_busy_hint(status_text)
+      self._set_scan_progress_phase("prepare", current, total, phase_text=status_text)
     log_message = str(payload.get("log_message", "") or "").strip()
     if log_message:
       self._log(log_message)
@@ -1443,10 +1808,9 @@ class MailScraperApp(QWidget):
       return
 
     self._render_job = None
-    self.progress_bar.setRange(0, max(1, len(screenshot_paths)))
-    self.progress_bar.setValue(0)
+    runtime = self._scan_runtime if isinstance(self._scan_runtime, dict) else self._new_scan_runtime()
+    self._set_scan_progress_phase("cloudscan", 0, max(1, int(runtime.get("raw_count", 0) or 0)), phase_text="Scanbereite Mails werden jetzt nacheinander analysiert...")
     self.pipeline_dashboard.set_stage("cloudscan", 0.0)
-    self._set_busy_hint("Scanbereite Mails werden jetzt nacheinander analysiert...")
     self._trace_mail_scan(
       "render_phase_finished",
       {
@@ -1472,10 +1836,9 @@ class MailScraperApp(QWidget):
         "error": str(err_msg or ""),
       },
     )
-    self.progress_bar.setVisible(False)
+    self._hide_progress(clear_phase_text=True)
     self.btn_scan.setEnabled(True)
     self.btn_connect.setEnabled(True)
-    self._set_busy_hint("")
     self._finalize_scan_without_uid_commit("Screenshot-Vorbereitung fehlgeschlagen. last_mail_uid wurde nicht fortgeschrieben.")
     QMessageBox.critical(self, "Screenshot-Fehler", f"Die E-Mail-Vorbereitung ist fehlgeschlagen:\n{err_msg}")
 
@@ -1493,8 +1856,7 @@ class MailScraperApp(QWidget):
       self._cleanup_scan_coordinator()
       self._cleanup_quota_governor()
       self.btn_scan.setEnabled(True)
-      self.progress_bar.setVisible(False)
-      self._set_busy_hint("")
+      self._finish_progress("Keine neuen oder verwertbaren Mails gefunden.")
       self.pipeline_dashboard.reset("Keine neuen oder verwertbaren Mails gefunden.")
       self._log("Suche beendet. Keine neuen/verwertbaren Belege gefunden.")
       self._finalize_scan_without_uid_commit(
@@ -1509,11 +1871,8 @@ class MailScraperApp(QWidget):
       self._begin_screenshot_rendering(render_candidates)
       return
 
-    self.progress_bar.setVisible(True)
-    self.progress_bar.setRange(0, max(1, len(raw_emails)))
-    self.progress_bar.setValue(0)
+    self._set_scan_progress_phase("cloudscan", 0, max(1, len(raw_emails)), phase_text="Kein Screenshot noetig. Mails werden direkt analysiert...")
     self.pipeline_dashboard.set_stage("cloudscan", 0.0)
-    self._set_busy_hint("Kein Screenshot noetig. Mails werden direkt analysiert...")
     self._log("Vorplanung abgeschlossen: Kein Screenshot noetig, Scan startet direkt mit den gewaehlten Quellen.")
     if self._scan_coordinator is not None:
       self._scan_coordinator.mark_render_phase_finished()
@@ -1523,8 +1882,7 @@ class MailScraperApp(QWidget):
       self._scan_coordinator = None
       self.btn_scan.setEnabled(True)
       self.btn_connect.setEnabled(True)
-      self.progress_bar.setVisible(False)
-      self._set_busy_hint("")
+      self._finish_progress("Scan abgeschlossen.")
       self.pipeline_dashboard.finish_all()
       self._log_governor_summary()
       governor_snapshot = self._governor_metrics_snapshot()
@@ -1665,6 +2023,10 @@ class MailScraperApp(QWidget):
       )
     finally:
       self._cleanup_quota_governor()
+
+  def resizeEvent(self, event):
+    super().resizeEvent(event)
+    self._refresh_progress_lyric_overlay()
 
   def closeEvent(self, event):
     if self._connect_task is not None and self._connect_task.isRunning():
@@ -3221,7 +3583,7 @@ class ScraperReviewWizardDialog(QDialog):
     self.einkauf_form_widget = EinkaufHeadFormWidget(self)
     self.einkauf_form_widget.logoSearchRequested.connect(self._on_manual_logo_search_requested)
     self.inputs = self.einkauf_form_widget.inputs
-    self.einkauf_form_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+    self.einkauf_form_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
     kopf_box.addWidget(self.einkauf_form_widget)
 
     # Rechnungs-Sektion (Platzhalter fuer Phase D1)
@@ -3248,7 +3610,6 @@ class ScraperReviewWizardDialog(QDialog):
     rechnung_layout.addWidget(self.lbl_rechnung_pdf_path)
     kopf_box.addWidget(self.rechnung_frame)
 
-    kopf_box.addStretch(1)
     kopf_scroll.setWidget(kopf_panel)
     self.data_tabs.addTab(kopf_scroll, "Kopfdaten")
 

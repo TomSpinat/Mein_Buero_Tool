@@ -342,13 +342,8 @@ class OrderEntryApp(QWidget):
 
         self.einkauf_form_widget = EinkaufHeadFormWidget(self, logo_search_mode="direct")
         self.einkauf_form_widget.logoSearchRequested.connect(self._start_logo_search_from_context)
-        self.einkauf_form_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
-
-        self._einkauf_form_scroll = QScrollArea()
-        self._einkauf_form_scroll.setWidgetResizable(True)
-        self._einkauf_form_scroll.setWidget(self.einkauf_form_widget)
-        self._einkauf_form_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self._einkauf_form_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        self.einkauf_form_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self._einkauf_form_scroll = self.einkauf_form_widget
         kopf_box.addWidget(self._einkauf_form_scroll)
 
         # Legacy QFormLayout fuer Verkauf-Modus
@@ -360,7 +355,6 @@ class OrderEntryApp(QWidget):
         self.form_layout_frame.setVisible(False)
         kopf_box.addWidget(self.form_layout_frame)
 
-        kopf_box.addStretch(1)
         kopf_scroll.setWidget(kopf_panel)
         self.data_tabs.addTab(kopf_scroll, "Kopfdaten")
 
