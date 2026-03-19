@@ -20,6 +20,8 @@ Orchestrierungs-Phasen (komponieren mehrere Bausteine):
 - Status-Report-Phase (build_einkauf_status_report)
 - Pre-Save-Phase (prepare_einkauf_save)
 - Reset-Phase (reset_einkauf_phase)
+- Review-Bundle-Aufbau (build_order_review_safe)
+- Pipeline-Save (execute_einkauf_save)
 """
 
 import logging
@@ -548,3 +550,84 @@ def reset_einkauf_phase(form_widget, items_widget, banner_widget=None, clear_rev
     banner_widget.setVisible(False)
   if clear_review:
     clear_einkauf_review_data(form_widget, items_widget)
+
+
+# ── Phase: Review-Bundle-Aufbau ─────────────────────────────────────────────
+
+def build_order_review_safe(form_widget, items_widget, settings_manager, payload, db=None):
+  """Review-Aufbau-Phase: Review-Bundle sicher aufbauen mit Guard und Fehlerbehandlung.
+
+  Prueft ob eine Bestellnummer vorhanden ist, baut das Review-Bundle via
+  EinkaufPipeline.build_order_review_bundle() auf und bereinigt bei Fehler
+  oder fehlendem Bestellnummer die bestehenden Review-Daten.
+
+  Bei Erfolg wird das Bundle zurueckgegeben — der Aufrufer entscheidet
+  ueber Verteilung (set_einkauf_review_data) und modulspezifische
+  Nachbearbeitung (z.B. OrderReviewPanelWidget, existing-order-Load).
+
+  Args:
+    form_widget: EinkaufHeadFormWidget-Instanz.
+    items_widget: EinkaufItemsTableWidget-Instanz.
+    settings_manager: SettingsManager-Instanz.
+    payload: Aktueller Einkauf-Payload (fuer Diff gegen DB).
+    db: Optionale bestehende DB-Verbindung (wird durchgereicht).
+
+  Returns:
+    dict:
+      'bundle': dict|None — Review-Bundle bei Erfolg, None sonst.
+      'db': Aktualisierte DB-Verbindung.
+      'status': 'ok' | 'no_bestellnummer' | 'error'
+  """
+  bestellnummer = _field_text(form_widget, "bestellnummer")
+  if not bestellnummer:
+    clear_einkauf_review_data(form_widget, items_widget)
+    return {"bundle": None, "db": db, "status": "no_bestellnummer"}
+  try:
+    bundle = EinkaufPipeline.build_order_review_bundle(
+      settings_manager, payload, db=db,
+    )
+    db = bundle.get("db", db)
+    return {"bundle": bundle, "db": db, "status": "ok"}
+  except Exception as e:
+    log.warning("Review-Bundle-Aufbau fehlgeschlagen: %s", e)
+    clear_einkauf_review_data(form_widget, items_widget)
+    return {"bundle": None, "db": db, "status": "error"}
+
+
+# ── Phase: Pipeline-Save ───────────────────────────────────────────────────
+
+def execute_einkauf_save(parent_widget, settings_manager, payload, inputs_dict,
+                         payload_dict, db=None, review_bundle=None,
+                         skip_existing_review=False, text_fn=None):
+  """Pipeline-Save-Phase: Bestaetigungsdialog + Speichern ausfuehren.
+
+  Kombiniert make_order_number_callback() + EinkaufPipeline.confirm_and_save_single()
+  als zusammengehoerenden Save-Aufruf. Der Aufrufer entscheidet ueber
+  modulspezifische Pre-/Post-Save-Logik.
+
+  Args:
+    parent_widget: Eltern-Widget fuer Dialoge.
+    settings_manager: SettingsManager-Instanz.
+    payload: Vollstaendiger Einkauf-Payload.
+    inputs_dict: Widget-Dict fuer Order-Number-Callback (z.B. form_widget.inputs).
+    payload_dict: Payload-Dict fuer Order-Number-Callback-Update.
+    db: Optionale bestehende DB-Verbindung.
+    review_bundle: Optionales Review-Bundle fuer Bestaetigungsdialog.
+    skip_existing_review: Wenn True, wird kein erneuter Review-Dialog gezeigt.
+    text_fn: Optionale Text-Normalisierungsfunktion fuer Order-Number-Callback.
+
+  Returns:
+    dict: Ergebnis von EinkaufPipeline.confirm_and_save_single().
+  """
+  return EinkaufPipeline.confirm_and_save_single(
+    parent_widget,
+    settings_manager,
+    payload,
+    on_order_number_changed=make_order_number_callback(
+      inputs_dict, payload_dict, text_fn=text_fn,
+    ),
+    show_new_number_info=True,
+    db=db,
+    review_bundle=review_bundle,
+    skip_existing_review_dialog=skip_existing_review,
+  )

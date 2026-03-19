@@ -51,10 +51,10 @@ from module.shared_einkauf_review import (
   collect_einkauf_payload,
   apply_einkauf_post_save,
   set_einkauf_review_data,
-  clear_einkauf_review_data,
-  make_order_number_callback,
   populate_einkauf_phase,
   build_einkauf_status_report,
+  build_order_review_safe,
+  execute_einkauf_save,
 )
 from module.normalization_dialog import NormalizationPanel
 from module.amazon_country_dialog import AmazonCountryPanel
@@ -3333,28 +3333,23 @@ class ScraperReviewWizardDialog(QDialog):
       payload = self._collect_current_payload()
     except Exception:
       payload = dict(self._current_mail_record())
-    bestellnummer = self._safe_text(payload.get("bestellnummer", "")).strip()
-    if not bestellnummer:
-      self._current_order_review_bundle = None
-      clear_einkauf_review_data(self.einkauf_form_widget, self.einkauf_items_widget)
-      self.order_review_widget.clear_review("Noch keine Bestellnummer erkannt. Die Pruefung startet, sobald eine Nummer vorhanden ist.")
-      return None
-    try:
-      bundle = EinkaufPipeline.build_order_review_bundle(
-        self.settings_manager,
-        payload,
-        db=self._shared_db,
-      )
-      self._shared_db = bundle.get("db", self._shared_db)
-      self._current_order_review_bundle = bundle
+
+    result = build_order_review_safe(
+      self.einkauf_form_widget, self.einkauf_items_widget,
+      self.settings_manager, payload, db=self._shared_db,
+    )
+    self._shared_db = result["db"]
+    bundle = result["bundle"]
+    self._current_order_review_bundle = bundle
+
+    if bundle:
       set_einkauf_review_data(self.einkauf_form_widget, self.einkauf_items_widget, bundle)
       self.order_review_widget.set_review_data(bundle)
-      return bundle
-    except Exception as e:
-      log_exception(__name__, e)
-      clear_einkauf_review_data(self.einkauf_form_widget, self.einkauf_items_widget)
+    elif result["status"] == "no_bestellnummer":
+      self.order_review_widget.clear_review("Noch keine Bestellnummer erkannt. Die Pruefung startet, sobald eine Nummer vorhanden ist.")
+    else:
       self.order_review_widget.clear_review("Aenderungspruefung momentan nicht verfuegbar.")
-      return None
+    return bundle
 
   def _collect_current_payload(self):
     return collect_einkauf_payload(
@@ -3600,15 +3595,11 @@ class ScraperReviewWizardDialog(QDialog):
   def _execute_pipeline_save(self, payload):
     """Fuehrt den Pipeline-Save mit Review-Bundle und Bestaetigungsdialog aus."""
     review_bundle = self._refresh_order_review()
-    save_result = EinkaufPipeline.confirm_and_save_single(
-      self,
-      self.settings_manager,
-      payload,
-      on_order_number_changed=make_order_number_callback(self.inputs, payload, text_fn=self._safe_text),
-      show_new_number_info=True,
-      db=self._shared_db,
-      review_bundle=review_bundle,
-      skip_existing_review_dialog=True,
+    save_result = execute_einkauf_save(
+      self, self.settings_manager, payload,
+      self.inputs, payload,
+      db=self._shared_db, review_bundle=review_bundle,
+      skip_existing_review=True, text_fn=self._safe_text,
     )
     self._shared_db = save_result.get("db", self._shared_db)
     return save_result

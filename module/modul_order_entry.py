@@ -35,14 +35,17 @@ from module.media.media_grid_selection_dialog import MediaGridSelectionDialog
 from module.media.media_service import MediaService
 
 from module.shared_einkauf_review import (
+    collect_einkauf_payload,
     apply_einkauf_post_save,
     set_einkauf_review_data,
+    clear_einkauf_review_data,
     refresh_summen_banner,
     check_einkauf_save_ready,
-    make_order_number_callback,
     populate_einkauf_phase,
     prepare_einkauf_save,
     reset_einkauf_phase,
+    build_order_review_safe,
+    execute_einkauf_save,
 )
 from module.shared_search_workflows import (
     create_logo_search_worker,
@@ -863,49 +866,41 @@ class OrderEntryApp(QWidget):
             widget.setToolTip("Neue Bestellnummer – noch nicht gespeichert.")
             # Review-Ansicht zuruecksetzen wenn Bestellnummer neu ist
             if hasattr(self, "einkauf_form_widget"):
-                self.einkauf_form_widget.clear_review_data()
+                clear_einkauf_review_data(self.einkauf_form_widget, self.einkauf_items_widget)
 
     def _load_existing_order_for_review(self, bestellnummer: str):
         """Laed die bestehende Bestellung und zeigt den Split-View Vergleich.
 
-        Genau wie _refresh_order_review() im Mail-Scraper-Wizard:
-        - Aktuellen Payload aus den Eingabefeldern aufbauen
-        - EinkaufPipeline.build_order_review_bundle() aufrufen
-        - einkauf_form_widget.set_review_data(bundle) aufrufen
-          → InlineChangeFieldRow zeigt Alt (gelb) | Pfeil | Neu (gruen)
+        Nutzt build_order_review_safe() fuer Review-Bundle-Aufbau mit
+        Bestellnummer-Guard und Fehlerbehandlung. Bei vorhandener Bestellung
+        werden die DB-Werte in die Maske geladen und der Split-View aktiviert.
         """
         try:
             nr = str(bestellnummer or "").strip()
             if not nr:
                 return
 
-            # Aktuellen Stand aller Eingabefelder als Payload sammeln
-            payload = {}
-            for key, widget in self.inputs.items():
-                payload[key] = str(widget.text() or "").strip()
-
-            # Waren aus dem EinkaufItemsTableWidget hinzufuegen (fuer vollstaendigen Payload)
-            payload["waren"] = self.einkauf_items_widget.get_items()
-
-            # Review-Bundle aufbauen (nutzt preview_order_enrichment fuer Diff)
-            bundle = EinkaufPipeline.build_order_review_bundle(
-                self.settings_manager,
-                payload,
-                db=self._lookup_db,
+            # Payload aus Widgets sammeln + Review-Bundle sicher aufbauen
+            payload = collect_einkauf_payload(self.einkauf_form_widget, self.einkauf_items_widget)
+            result = build_order_review_safe(
+                self.einkauf_form_widget, self.einkauf_items_widget,
+                self.settings_manager, payload, db=self._lookup_db,
             )
-            order_preview = bundle.get("order_preview", {}) if isinstance(bundle, dict) else {}
-            if not order_preview.get("order_exists"):
-                self.einkauf_form_widget.clear_review_data()
+            if result["status"] != "ok":
                 return
 
-            # Alle bestehenden DB-Werte in die Maske laden (erscheinen grau/neutral)
+            bundle = result["bundle"]
+            order_preview = bundle.get("order_preview", {}) if isinstance(bundle, dict) else {}
+            if not order_preview.get("order_exists"):
+                clear_einkauf_review_data(self.einkauf_form_widget, self.einkauf_items_widget)
+                return
+
+            # Bestehende DB-Werte in die Maske laden (erscheinen grau/neutral)
             existing_order = order_preview.get("existing_order", {})
             if existing_order:
                 self.einkauf_form_widget.set_payload(existing_order)
-                # current_gemini_data mit DB-Werten vorbelegen, damit Speichern ohne Scan funktioniert
                 self.current_gemini_data = dict(existing_order)
 
-            # Warenpositionen aus DB in die Tabelle laden
             existing_waren = order_preview.get("existing_waren", [])
             if existing_waren:
                 self.einkauf_items_widget.set_items(
@@ -913,14 +908,10 @@ class OrderEntryApp(QWidget):
                     ean_fill_callback=self.ean_service.find_best_local_ean_by_name,
                     payload=self.current_gemini_data,
                 )
-                # Waren auch in current_gemini_data eintragen
                 self.current_gemini_data["waren"] = [dict(w) for w in existing_waren]
 
-            # Split-View fuer geaenderte Felder einblenden;
-            # unveraenderte Felder behalten ihren gerade gesetzten Wert (clear_review_change bewahrt ihn)
+            # Split-View fuer geaenderte Felder einblenden
             set_einkauf_review_data(self.einkauf_form_widget, self.einkauf_items_widget, bundle)
-
-            # Speichern ermoeglichen auch ohne vorherigen KI-Scan
             self.btn_save_db.setEnabled(True)
 
         except Exception as exc:
@@ -1354,13 +1345,9 @@ class OrderEntryApp(QWidget):
             has_scan = bool(self.current_gemini_data.get("_scan_sources") or self.current_gemini_data.get("_provider_meta"))
             self.current_gemini_data["quelle"] = "modul1_scan" if has_scan else "modul1_manual"
 
-            save_result = EinkaufPipeline.confirm_and_save_single(
-                self,
-                self.settings_manager,
-                self.current_gemini_data,
-                on_order_number_changed=make_order_number_callback(self.inputs, self.current_gemini_data),
-                show_new_number_info=True,
-                db=None,
+            save_result = execute_einkauf_save(
+                self, self.settings_manager, self.current_gemini_data,
+                self.inputs, self.current_gemini_data,
             )
 
             if save_result.get("status") != "saved":
