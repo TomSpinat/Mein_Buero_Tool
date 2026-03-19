@@ -22,6 +22,9 @@ Orchestrierungs-Phasen (komponieren mehrere Bausteine):
 - Reset-Phase (reset_einkauf_phase)
 - Review-Bundle-Aufbau (build_order_review_safe)
 - Pipeline-Save (execute_einkauf_save)
+
+Ablauf-Funktionen (komponieren mehrere Phasen):
+- Save-Workflow (save_einkauf_workflow)
 """
 
 import logging
@@ -631,3 +634,79 @@ def execute_einkauf_save(parent_widget, settings_manager, payload, inputs_dict,
     review_bundle=review_bundle,
     skip_existing_review_dialog=skip_existing_review,
   )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Ablauf-Funktionen
+#
+# Groesste Einheiten, die mehrere Phasen zu zusammenhaengenden Ablaeufen
+# kombinieren. Jeder Ablauf kapselt einen vollstaendigen Lifecycle-Schritt
+# im Einkauf-Review-Pfad.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+# ── Ablauf: Save-Workflow ──────────────────────────────────────────────────
+
+def save_einkauf_workflow(parent_widget, settings_manager, payload, items_widget,
+                          inputs_dict, payload_dict, db=None, review_bundle=None,
+                          skip_existing_review=False, text_fn=None):
+  """Save-Ablauf: Pipeline-Save + Post-Save-Aktionen als zusammenhaengender Workflow.
+
+  Kombiniert execute_einkauf_save() + Status-Pruefung + apply_einkauf_post_save()
+  zu einem einzigen Ablauf. Der Aufrufer klaert vorher die Pre-Save-Vorbereitung
+  (Payload-Aufbau, Validierung, Quelle) und nachher modulspezifische Folgeaktionen
+  (Reset, Finalisierung, Navigation).
+
+  Beide Module fuehren nach dem Pipeline-Save identisch Bildentscheidungen und
+  Pending-Matches aus — dieser Ablauf vereinheitlicht diesen Kern.
+
+  Args:
+    parent_widget: Eltern-Widget fuer Dialoge.
+    settings_manager: SettingsManager-Instanz.
+    payload: Vollstaendiger Einkauf-Payload (nach Pre-Save-Vorbereitung).
+    items_widget: EinkaufItemsTableWidget-Instanz (fuer Post-Save-Bildentscheidungen).
+    inputs_dict: Widget-Dict fuer Order-Number-Callback (z.B. form_widget.inputs).
+    payload_dict: Payload-Dict fuer Order-Number-Callback-Update.
+    db: Optionale bestehende DB-Verbindung.
+    review_bundle: Optionales Review-Bundle fuer Bestaetigungsdialog.
+    skip_existing_review: Wenn True, wird kein erneuter Review-Dialog gezeigt.
+    text_fn: Optionale Text-Normalisierungsfunktion fuer Order-Number-Callback.
+
+  Returns:
+    dict:
+      'status': 'saved' | 'cancelled' — Ergebnis des Ablaufs.
+      'save_result': dict — Rohes Pipeline-Save-Ergebnis.
+      'post_save': dict|None — Post-Save-Ergebnis (nur bei 'saved').
+      'db': Aktualisierte DB-Verbindung.
+      'renamed': bool — Ob die Bestellnummer umbenannt wurde.
+  """
+  save_result = execute_einkauf_save(
+    parent_widget, settings_manager, payload,
+    inputs_dict, payload_dict,
+    db=db, review_bundle=review_bundle,
+    skip_existing_review=skip_existing_review, text_fn=text_fn,
+  )
+  db = save_result.get("db", db)
+
+  if save_result.get("status") != "saved":
+    return {
+      "status": "cancelled",
+      "save_result": save_result,
+      "post_save": None,
+      "db": db,
+      "renamed": False,
+    }
+
+  post_save = apply_einkauf_post_save(
+    parent_widget, settings_manager,
+    items_widget, save_result, db=db,
+  )
+  db = post_save.get("db", db)
+
+  return {
+    "status": "saved",
+    "save_result": save_result,
+    "post_save": post_save,
+    "db": db,
+    "renamed": bool(save_result.get("renamed")),
+  }

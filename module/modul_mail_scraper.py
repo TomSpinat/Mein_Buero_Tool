@@ -49,12 +49,11 @@ from module.einkauf_pipeline import EinkaufPipeline
 from module.einkauf_ui import EinkaufHeadFormWidget, EinkaufItemsTableWidget, OrderReviewPanelWidget, SummenBannerWidget
 from module.shared_einkauf_review import (
   collect_einkauf_payload,
-  apply_einkauf_post_save,
   set_einkauf_review_data,
   populate_einkauf_phase,
   build_einkauf_status_report,
   build_order_review_safe,
-  execute_einkauf_save,
+  save_einkauf_workflow,
 )
 from module.normalization_dialog import NormalizationPanel
 from module.amazon_country_dialog import AmazonCountryPanel
@@ -3534,17 +3533,32 @@ class ScraperReviewWizardDialog(QDialog):
       payload = self._build_save_payload()
       self._set_current_mail_data(payload)
 
-      # 3. Pipeline-Save ausfuehren
-      save_result = self._execute_pipeline_save(payload)
-      if save_result.get("status") != "saved":
+      # 3. Save-Workflow: Review + Pipeline-Save + Post-Save
+      review_bundle = self._refresh_order_review()
+      result = save_einkauf_workflow(
+        self, self.settings_manager, payload,
+        self.einkauf_items_widget, self.inputs, payload,
+        db=self._shared_db, review_bundle=review_bundle,
+        skip_existing_review=True, text_fn=self._safe_text,
+      )
+      self._shared_db = result["db"]
+
+      if result["status"] != "saved":
         return
 
-      # 4. Post-Save: Bilder + Pending Matches
-      self._apply_post_save_actions(save_result)
+      # 4. Mail-Scraper-spezifisch: Warnung bei Bildfehler
+      post_save = result.get("post_save") or {}
+      image_result = post_save.get("image_result", {})
+      if image_result.get("reason") == "error":
+        QMessageBox.warning(
+          self,
+          "Bildpflege",
+          "Die Bestellung wurde gespeichert, aber die gemerkten Bildentscheidungen konnten noch nicht uebernommen werden."
+        )
 
       # 5. Finalisieren + weiter
       self._finalize_current_mail("saved")
-      if save_result.get("renamed"):
+      if result.get("renamed"):
         self.summary["renamed"] += 1
       self._cleanup_and_advance()
     except Exception as e:
@@ -3591,36 +3605,6 @@ class ScraperReviewWizardDialog(QDialog):
       if self._current_rechnung_pdf_path:
         payload["rechnung_pdf_pfad"] = self._current_rechnung_pdf_path
     return payload
-
-  def _execute_pipeline_save(self, payload):
-    """Fuehrt den Pipeline-Save mit Review-Bundle und Bestaetigungsdialog aus."""
-    review_bundle = self._refresh_order_review()
-    save_result = execute_einkauf_save(
-      self, self.settings_manager, payload,
-      self.inputs, payload,
-      db=self._shared_db, review_bundle=review_bundle,
-      skip_existing_review=True, text_fn=self._safe_text,
-    )
-    self._shared_db = save_result.get("db", self._shared_db)
-    return save_result
-
-  def _apply_post_save_actions(self, save_result):
-    """Wendet Bildentscheidungen und Pending-Matches nach erfolgreichem Save an."""
-    result = apply_einkauf_post_save(
-      self, self.settings_manager,
-      self.einkauf_items_widget, save_result,
-      db=self._shared_db,
-    )
-    self._shared_db = result.get("db", self._shared_db)
-
-    # Mail-Scraper-spezifisch: Warnung bei Bildfehler
-    image_result = result.get("image_result", {})
-    if image_result.get("reason") == "error":
-      QMessageBox.warning(
-        self,
-        "Bildpflege",
-        "Die Bestellung wurde gespeichert, aber die gemerkten Bildentscheidungen konnten noch nicht uebernommen werden."
-      )
 
   def _find_next_pending_index(self):
     """Sucht den naechsten 'pending' Index (vorwaerts, dann rueckwaerts). Gibt -1 zurueck wenn keiner."""

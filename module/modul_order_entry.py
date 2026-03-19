@@ -36,7 +36,6 @@ from module.media.media_service import MediaService
 
 from module.shared_einkauf_review import (
     collect_einkauf_payload,
-    apply_einkauf_post_save,
     set_einkauf_review_data,
     clear_einkauf_review_data,
     refresh_summen_banner,
@@ -45,7 +44,7 @@ from module.shared_einkauf_review import (
     prepare_einkauf_save,
     reset_einkauf_phase,
     build_order_review_safe,
-    execute_einkauf_save,
+    save_einkauf_workflow,
 )
 from module.shared_search_workflows import (
     create_logo_search_worker,
@@ -1330,7 +1329,7 @@ class OrderEntryApp(QWidget):
     # ── Einkauf-Save ─────────────────────────────────────────────────
 
     def _save_einkauf(self):
-        """Einkauf-Pfad: Payload aus Widgets aufbauen, Pipeline-Save, Bild-Decisions, Matching."""
+        """Einkauf-Pfad: Payload aus Widgets aufbauen, Save-Workflow, Reset."""
         # Pre-Save-Phase: Payload sammeln + Waren validieren
         self.current_gemini_data, issues = prepare_einkauf_save(
             self.einkauf_form_widget,
@@ -1345,19 +1344,12 @@ class OrderEntryApp(QWidget):
             has_scan = bool(self.current_gemini_data.get("_scan_sources") or self.current_gemini_data.get("_provider_meta"))
             self.current_gemini_data["quelle"] = "modul1_scan" if has_scan else "modul1_manual"
 
-            save_result = execute_einkauf_save(
+            result = save_einkauf_workflow(
                 self, self.settings_manager, self.current_gemini_data,
-                self.inputs, self.current_gemini_data,
+                self.einkauf_items_widget, self.inputs, self.current_gemini_data,
             )
-
-            if save_result.get("status") != "saved":
-                return
-
-            apply_einkauf_post_save(
-                self, self.settings_manager,
-                self.einkauf_items_widget, save_result,
-            )
-            self._reset_form()
+            if result["status"] == "saved":
+                self._reset_form()
         except Exception as e:
             log_exception(__name__, e)
             CustomMsgBox.critical(self, "Datenbank-Fehler", str(e))
