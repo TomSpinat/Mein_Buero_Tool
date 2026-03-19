@@ -255,7 +255,6 @@ class GeminiAiProvider(AiProvider):
             generation_config["response_mime_type"] = str(request.response_mime_type)
         if caps.supports_response_schema and request.response_schema:
             generation_config["response_schema"] = request.response_schema
-
         kwargs: Dict[str, Any] = {"generation_config": generation_config}
         tools = request.tools or []
         if tools and caps.supports_tools:

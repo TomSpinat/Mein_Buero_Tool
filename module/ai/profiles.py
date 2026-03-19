@@ -85,6 +85,7 @@ _PROFILE_DEFINITIONS: Dict[str, ProviderProfile] = {
         metadata={
             "profile_family": "starter",
             "provider_tier": "free",
+            "gemini_media_resolution": "medium",
             "supports_future_overrides": True,
             "safe_adjustments": {
                 "second_pass_mode": ("off", "missing_required"),
@@ -131,8 +132,8 @@ _PROFILE_DEFINITIONS: Dict[str, ProviderProfile] = {
                 max_passes=1,
                 require_secondary_source=True,
                 require_missing_fields=True,
-                allowed_missing_fields=("waren", "waren_unvollstaendig", "bestellnummer", "preise", "tracking"),
-                allowed_source_types=("mail_attachment", "email_message", "mail_render_screenshot"),
+                allowed_missing_fields=("waren", "waren_unvollstaendig", "bestellnummer", "preise"),
+                allowed_source_types=("mail_attachment", "email_message"),
             ),
             input=InputPolicy(
                 preferred_input_strategy="auto",
@@ -149,13 +150,15 @@ _PROFILE_DEFINITIONS: Dict[str, ProviderProfile] = {
             ),
         ),
         status_hints={
-            "second_pass_conditional": "Aktives Gemini-Profil erlaubt genau einen Ergaenzungspass bei passenden Luecken.",
+            "second_pass_conditional": "Aktives Gemini-Profil erlaubt nur einen knappen Ergaenzungspass bei klar passenden Luecken.",
             "parallelism_reduced": "Standardprofil haelt die Parallelitaet moderat, um Aussetzer zu vermeiden.",
             "text_fallback": "Text-only-Fallback bleibt ein Rueckfall, nicht der Hauptweg.",
+            "second_pass_saved": "Zweiter Pass wurde eingespart, weil Pass 1 schon genug Material hatte.",
         },
         metadata={
             "profile_family": "starter",
             "provider_tier": "paid",
+            "gemini_media_resolution": "medium",
             "supports_future_overrides": True,
             "safe_adjustments": {
                 "second_pass_mode": ("off", "missing_required", "expanded"),

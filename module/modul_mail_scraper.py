@@ -1680,7 +1680,7 @@ class MailScanTaskThread(QThread):
   status_signal = pyqtSignal(object)
   finished_signal = pyqtSignal(object)
   PRIMARY_PROVIDER_TIMEOUT_SEC = 120
-  SECOND_PASS_PROVIDER_TIMEOUT_SEC = 90
+  SECOND_PASS_PROVIDER_TIMEOUT_SEC = 30
 
   def __init__(self, api_key, raw_email, screenshot_path="", provider_name="gemini", provider_profile_name="", provider_profile_overrides=None, order_index=0, governor=None, parent=None):
     super().__init__(parent)
@@ -1882,6 +1882,24 @@ class MailScanTaskThread(QThread):
       missing.append("preise")
 
     return self._dedupe_ordered(missing)
+
+  def _tighten_second_pass_missing_fields(self, prepared_scan, missing_fields):
+    effective_missing = list(self._dedupe_ordered(missing_fields))
+    source_plan = dict(getattr(prepared_scan, "source_plan", {}) or {})
+    input_category = self._safe_text(source_plan.get("input_category", "")).lower()
+    secondary_source = getattr(prepared_scan, "secondary_source", None)
+    secondary_source_type = self._safe_text(getattr(secondary_source, "source_type", ""))
+
+    if input_category in {"pdf_primary", "hybrid_full"}:
+      return [], "Zweiter Pass wurde eingespart, weil Pass 1 schon genug Material hatte."
+
+    if secondary_source_type == "email_message":
+      before_count = len(effective_missing)
+      effective_missing = [field_name for field_name in effective_missing if field_name != "tracking"]
+      if before_count > 0 and not effective_missing:
+        return [], "Zweiter Pass wurde eingespart, weil nur noch Versandhinweise fehlten."
+
+    return self._dedupe_ordered(effective_missing), ""
 
   def _extract_effective_profile_meta(self, result):
     result = result if isinstance(result, dict) else {}
@@ -2173,12 +2191,14 @@ class MailScanTaskThread(QThread):
     return merged, self._dedupe_ordered(added_fields)
 
   def _run_optional_second_pass(self, raw, prepared_scan, primary_result):
-    missing_fields = self._collect_missing_fields(primary_result)
+    raw_missing_fields = self._collect_missing_fields(primary_result)
+    missing_fields, fast_path_reason = self._tighten_second_pass_missing_fields(prepared_scan, raw_missing_fields)
     profile_meta = self._extract_effective_profile_meta(primary_result)
     self._trace(
       "second_pass_evaluated",
       {
         "missing_fields": list(missing_fields or []),
+        "raw_missing_fields": list(raw_missing_fields or []),
         "secondary_source_type": getattr(getattr(prepared_scan, "secondary_source", None), "source_type", ""),
       },
     )
@@ -2193,7 +2213,7 @@ class MailScanTaskThread(QThread):
       )
       should_run_second_pass = bool(governor_allowed)
     if not should_run_second_pass:
-      final_reason = self._safe_text(governor_reason or profile_reason)
+      final_reason = self._safe_text(governor_reason or profile_reason or fast_path_reason)
       self._trace("second_pass_skipped", {"reason": final_reason, "missing_fields": list(missing_fields or [])})
       if final_reason:
         logging.info("Gemini-Mail-Scan zweiter Pass unterdrueckt: %s", final_reason)

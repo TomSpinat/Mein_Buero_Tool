@@ -191,6 +191,11 @@ def process_receipt_with_gemini(
                 transport=provider_profile.transport,
                 model_name=provider_profile.model_name,
                 profile=provider_profile,
+                metadata={
+                    "media_resolution": str(provider_profile.metadata.get("gemini_media_resolution", "") or "").strip(),
+                    "input_category": str((scan_decision or {}).get("input_category", "") or ""),
+                    "prompt_class": str(prompt_profile or ""),
+                },
             )
         )
     except Exception as exc:
