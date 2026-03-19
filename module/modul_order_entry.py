@@ -691,7 +691,7 @@ class OrderEntryApp(QWidget):
     def _fill_ui(self):
         """Füllt das GUI aus dem current_gemini_data Dictionary."""
         if self.scan_mode == "einkauf":
-            self._fill_einkauf_ui()  # inkl. Summen-Banner via populate_einkauf_phase
+            self._fill_einkauf_ui()  # inkl. Summen-Banner via Shared-Apply-Workflow
         else:
             self._fill_verkauf_ui()
             self._update_summen_banner()
@@ -857,47 +857,28 @@ class OrderEntryApp(QWidget):
                 f"ist bereits in der Datenbank gespeichert.\n"
                 f"Beim Speichern wird der bestehende Eintrag aktualisiert."
             )
-            # Bestehende Bestellung laden + Split-View Vergleich anzeigen
-            self._load_existing_order_for_review(bestellnummer)
+            try:
+                payload = collect_einkauf_payload(self.einkauf_form_widget, self.einkauf_items_widget)
+                review_result = refresh_einkauf_review_workflow(
+                    self.einkauf_form_widget,
+                    self.einkauf_items_widget,
+                    self.settings_manager,
+                    payload,
+                    db=self._lookup_db,
+                    hydrate_existing_order=True,
+                    ean_callback=self.ean_service.find_best_local_ean_by_name,
+                    payload_target=self.current_gemini_data,
+                )
+                self._lookup_db = review_result["db"]
+                if review_result["status"] == "ok" and review_result["order_exists"]:
+                    self.btn_save_db.setEnabled(True)
+            except Exception as exc:
+                log_exception(__name__, exc)
         else:
             widget.setToolTip("Neue Bestellnummer – noch nicht gespeichert.")
             # Review-Ansicht zuruecksetzen wenn Bestellnummer neu ist
             if hasattr(self, "einkauf_form_widget"):
                 clear_einkauf_review_data(self.einkauf_form_widget, self.einkauf_items_widget)
-
-    def _load_existing_order_for_review(self, bestellnummer: str):
-        """Laed die bestehende Bestellung und zeigt den Split-View Vergleich.
-
-        Nutzt den gemeinsamen Review-Refresh-Workflow mit Bestellnummer-Guard,
-        Fehlerbehandlung und optionaler Existing-Order-Hydration.
-        """
-        try:
-            nr = str(bestellnummer or "").strip()
-            if not nr:
-                return
-
-            payload = collect_einkauf_payload(self.einkauf_form_widget, self.einkauf_items_widget)
-            result = refresh_einkauf_review_workflow(
-                self.einkauf_form_widget,
-                self.einkauf_items_widget,
-                self.settings_manager,
-                payload,
-                db=self._lookup_db,
-                hydrate_existing_order=True,
-                ean_callback=self.ean_service.find_best_local_ean_by_name,
-                payload_target=self.current_gemini_data,
-            )
-            self._lookup_db = result["db"]
-            if result["status"] != "ok":
-                return
-
-            if not result["order_exists"]:
-                return
-
-            self.btn_save_db.setEnabled(True)
-
-        except Exception as exc:
-            log_exception(__name__, exc)
 
     def _start_logo_search_from_context(self, context):
         """Slot fuer EinkaufHeadFormWidget.logoSearchRequested – delegiert an _start_logo_search()."""
@@ -1209,17 +1190,14 @@ class OrderEntryApp(QWidget):
     def _update_save_button_state(self):
         """Aktiviert/deaktiviert den Save-Button basierend auf Pflichtfeld-Validierung."""
         if self.scan_mode == "einkauf":
-            self.btn_save_db.setEnabled(self._check_einkauf_save_ready())
+            self.btn_save_db.setEnabled(check_einkauf_save_ready(
+                self.einkauf_form_widget,
+                self.einkauf_items_widget,
+                mark_fields=True,
+                tooltip="Pflichtfeld: Bestellnummer muss ausgefuellt sein",
+            ))
         else:
             self.btn_save_db.setEnabled(self._check_verkauf_save_ready())
-
-    def _check_einkauf_save_ready(self):
-        """Einkauf-Pfad: Bestellnummer + mindestens 1 Position mit Produktname."""
-        return check_einkauf_save_ready(
-            self.einkauf_form_widget, self.einkauf_items_widget,
-            mark_fields=True,
-            tooltip="Pflichtfeld: Bestellnummer muss ausgefuellt sein",
-        )
 
     def _check_verkauf_save_ready(self):
         """Verkauf-Pfad (Legacy): Ticket-Name + mindestens 1 Zeile in der Tabelle."""
@@ -1279,7 +1257,11 @@ class OrderEntryApp(QWidget):
 
         # Modus-spezifische Felder/Tabellen leeren
         if self.scan_mode == "einkauf":
-            self._reset_einkauf_state()
+            reset_einkauf_review_workflow(
+                self.einkauf_form_widget,
+                self.einkauf_items_widget,
+                self.summen_banner,
+            )
         else:
             self._reset_verkauf_state()
 
@@ -1291,14 +1273,6 @@ class OrderEntryApp(QWidget):
         self.logo_search_worker = None
         self.product_image_search_worker = None
         self._pending_image_search_context = None
-
-    def _reset_einkauf_state(self):
-        """Einkauf-Pfad: Kopfdaten-Widget + Artikel-Widget + Banner leeren."""
-        reset_einkauf_review_workflow(
-            self.einkauf_form_widget,
-            self.einkauf_items_widget,
-            self.summen_banner,
-        )
 
     def _reset_verkauf_state(self):
         """Verkauf-Pfad (Legacy): QLineEdits + QTableWidget leeren."""
@@ -1318,6 +1292,11 @@ class OrderEntryApp(QWidget):
     def _save_einkauf(self):
         """Einkauf-Pfad: Payload aus Widgets aufbauen, Save-Workflow, Reset."""
         try:
+            def _apply_source(payload):
+                has_scan = bool(payload.get("_scan_sources") or payload.get("_provider_meta"))
+                payload["quelle"] = "modul1_scan" if has_scan else "modul1_manual"
+                return payload
+
             result = prepare_and_save_einkauf_workflow(
                 self,
                 self.settings_manager,
@@ -1325,7 +1304,7 @@ class OrderEntryApp(QWidget):
                 self.einkauf_items_widget,
                 self.inputs,
                 base_payload=self.current_gemini_data,
-                payload_enricher=self._enrich_einkauf_save_payload,
+                payload_enricher=_apply_source,
             )
             self.current_gemini_data = result["payload"]
             if result["issues"]:
@@ -1336,12 +1315,6 @@ class OrderEntryApp(QWidget):
         except Exception as e:
             log_exception(__name__, e)
             CustomMsgBox.critical(self, "Datenbank-Fehler", str(e))
-
-    def _enrich_einkauf_save_payload(self, payload):
-        """Setzt die Quelle fuer den Einkauf-Save anhand der Scan-Herkunft."""
-        has_scan = bool(payload.get("_scan_sources") or payload.get("_provider_meta"))
-        payload["quelle"] = "modul1_scan" if has_scan else "modul1_manual"
-        return payload
 
     # ── Verkauf-Save (Legacy) ────────────────────────────────────────
 

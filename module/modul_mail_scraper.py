@@ -51,7 +51,6 @@ from module.shared_einkauf_review import (
   collect_einkauf_payload,
   build_einkauf_status_report,
   apply_einkauf_review_workflow,
-  refresh_einkauf_review_workflow,
   prepare_and_save_einkauf_workflow,
 )
 from module.normalization_dialog import NormalizationPanel
@@ -2634,6 +2633,7 @@ class ScraperReviewWizardDialog(QDialog):
     )
     self._shared_db = result["db"]
     self._current_order_review_bundle = result["review_bundle"]
+    return result
 
   def _clear_mapping_panel(self):
     while self.mapping_panel_host.count():
@@ -3334,32 +3334,6 @@ class ScraperReviewWizardDialog(QDialog):
     self._run_mapping_for_current_mail(show_feedback=False, rebuild=False)
 
 
-  def _refresh_order_review(self):
-    try:
-      payload = self._collect_current_payload()
-    except Exception:
-      payload = dict(self._current_mail_record())
-
-    result = refresh_einkauf_review_workflow(
-      self.einkauf_form_widget,
-      self.einkauf_items_widget,
-      self.settings_manager,
-      payload,
-      db=self._shared_db,
-      review_widget=self.order_review_widget,
-      no_bestellnummer_message="Noch keine Bestellnummer erkannt. Die Pruefung startet, sobald eine Nummer vorhanden ist.",
-      error_message="Aenderungspruefung momentan nicht verfuegbar.",
-    )
-    self._shared_db = result["db"]
-    self._current_order_review_bundle = result["bundle"]
-    return result["bundle"]
-
-  def _collect_current_payload(self):
-    return collect_einkauf_payload(
-      self.einkauf_form_widget,
-      self.einkauf_items_widget,
-      self._current_mail_record(),
-    )
   def _lookup_ean_for_selected_row(self):
     """EAN-Suche fuer die selektierte Artikelzeile (delegiert an shared workflow)."""
     context = self.einkauf_items_widget.get_selected_context()
@@ -3411,7 +3385,11 @@ class ScraperReviewWizardDialog(QDialog):
 
   def _run_mapping_for_current_mail(self, show_feedback=True, rebuild=False):
     try:
-      payload = self._collect_current_payload()
+      payload = collect_einkauf_payload(
+        self.einkauf_form_widget,
+        self.einkauf_items_widget,
+        self._current_mail_record(),
+      )
       state = self._ensure_mapping_state_for_index(self.current_index, rebuild=rebuild, source_payload=payload)
       self._apply_payload_to_current_mail(state.get("payload", {}))
 
@@ -3535,10 +3513,9 @@ class ScraperReviewWizardDialog(QDialog):
 
       # 2. Payload zusammenstellen + zurueckschreiben
       payload = self._build_save_payload()
-      self._set_current_mail_data(payload)
+      apply_result = self._apply_payload_to_current_mail(payload)
 
-      # 3. Save-Workflow: Review + Pipeline-Save + Post-Save
-      review_bundle = self._refresh_order_review()
+      # 3. Save-Workflow: Apply + Save + Post-Save
       result = prepare_and_save_einkauf_workflow(
         self,
         self.settings_manager,
@@ -3547,7 +3524,8 @@ class ScraperReviewWizardDialog(QDialog):
         self.inputs,
         base_payload=payload,
         payload_dict=payload,
-        db=self._shared_db, review_bundle=review_bundle,
+        db=self._shared_db,
+        review_bundle=apply_result["review_bundle"],
         skip_existing_review=True, text_fn=self._safe_text,
         validate_waren=False,
       )
@@ -3607,7 +3585,11 @@ class ScraperReviewWizardDialog(QDialog):
 
   def _build_save_payload(self):
     """Baut den vollstaendigen Save-Payload fuer die aktuelle Mail."""
-    payload = self._collect_current_payload()
+    payload = collect_einkauf_payload(
+      self.einkauf_form_widget,
+      self.einkauf_items_widget,
+      self._current_mail_record(),
+    )
     item = self._current_mail_record()
     payload["quelle"] = "mail_scraper"
     payload["mail_uid"] = str(item.get("_mail_uid", "") or "").strip()
