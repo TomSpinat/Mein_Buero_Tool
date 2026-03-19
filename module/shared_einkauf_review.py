@@ -24,7 +24,11 @@ Orchestrierungs-Phasen (komponieren mehrere Bausteine):
 - Pipeline-Save (execute_einkauf_save)
 
 Ablauf-Funktionen (komponieren mehrere Phasen):
+- Payload-Anwenden + Review-Refresh (apply_einkauf_review_workflow)
+- Review-Refresh inkl. optional Existing-Order-Hydration (refresh_einkauf_review_workflow)
 - Save-Workflow (save_einkauf_workflow)
+- Pre-Save + Save als Gesamtablauf (prepare_and_save_einkauf_workflow)
+- Reset inkl. optionalem Review-Panel-Clear (reset_einkauf_review_workflow)
 """
 
 import logging
@@ -647,6 +651,181 @@ def execute_einkauf_save(parent_widget, settings_manager, payload, inputs_dict,
 
 # ── Ablauf: Save-Workflow ──────────────────────────────────────────────────
 
+def apply_einkauf_review_workflow(form_widget, items_widget, banner_widget, payload,
+                                  ean_callback=None, settings_manager=None,
+                                  db=None, refresh_review=False, review_widget=None,
+                                  no_bestellnummer_message=None,
+                                  error_message=None, extra_checks=None):
+  """Wendet Payload an und sammelt den gemeinsamen Einkauf-Review-Zustand.
+
+  Kombiniert Post-Populate-Phase, optionalen Review-Refresh und
+  Status-Report-Aufbau zu einem groesseren Ablaufpunkt fuer Module,
+  die einen Einkaufszustand komplett neu anwenden wollen.
+
+  Args:
+    form_widget: EinkaufHeadFormWidget-Instanz.
+    items_widget: EinkaufItemsTableWidget-Instanz.
+    banner_widget: SummenBannerWidget-Instanz.
+    payload: Payload-Dict mit Kopfdaten + 'waren'-Liste.
+    ean_callback: Optionaler Callback fuer lokale EAN-Aufloesung.
+    settings_manager: SettingsManager-Instanz (nur noetig bei refresh_review=True).
+    db: Optionale bestehende DB-Verbindung.
+    refresh_review: Wenn True, wird zusaetzlich der Review-Refresh ausgefuehrt.
+    review_widget: Optionales OrderReviewPanelWidget fuer kompakte Review-Anzeige.
+    no_bestellnummer_message: Optionaler Text fuer den Leerfall ohne Bestellnummer.
+    error_message: Optionaler Text fuer den Fehler-/Leerfall ohne Bundle.
+    extra_checks: Optionale Zusatz-Checks fuer die Checkliste.
+
+  Returns:
+    dict:
+      'payload': dict - Sicherer Payload.
+      'report': dict - Status-Report von build_einkauf_status_report().
+      'review_bundle': dict|None - Optionales Review-Bundle.
+      'review_status': str - 'ok' | 'no_bestellnummer' | 'error' | 'skipped'
+      'order_exists': bool - True wenn Bundle eine bestehende Bestellung kennt.
+      'db': Aktualisierte DB-Verbindung.
+  """
+  safe_payload = payload if isinstance(payload, dict) else {}
+  populate_einkauf_phase(
+    form_widget, items_widget, banner_widget,
+    safe_payload, ean_callback=ean_callback,
+  )
+
+  review_result = {
+    "bundle": None,
+    "status": "skipped",
+    "order_exists": False,
+    "db": db,
+  }
+  if refresh_review:
+    if settings_manager is None:
+      raise ValueError("settings_manager wird fuer refresh_review=True benoetigt.")
+    review_result = refresh_einkauf_review_workflow(
+      form_widget, items_widget, settings_manager, safe_payload,
+      db=db, review_widget=review_widget,
+      no_bestellnummer_message=no_bestellnummer_message,
+      error_message=error_message,
+    )
+
+  report = build_einkauf_status_report(
+    form_widget, items_widget, safe_payload,
+    extra_checks=extra_checks,
+  )
+  return {
+    "payload": safe_payload,
+    "report": report,
+    "review_bundle": review_result.get("bundle"),
+    "review_status": review_result.get("status", "skipped"),
+    "order_exists": bool(review_result.get("order_exists")),
+    "db": review_result.get("db", db),
+  }
+
+
+def refresh_einkauf_review_workflow(form_widget, items_widget, settings_manager,
+                                    payload, db=None, review_widget=None,
+                                    no_bestellnummer_message=None,
+                                    error_message=None, hydrate_existing_order=False,
+                                    ean_callback=None, payload_target=None):
+  """Aktualisiert den Einkauf-Review-Pfad sicher und optional mit DB-Hydration.
+
+  Kapselt Guard + Bundle-Aufbau + Standard-UI-Folgen des Einkauf-Reviews.
+  Optional kann bei bestehender Bestellung der gespeicherte DB-Zustand in
+  Formular und Artikeltabelle geladen werden.
+
+  Args:
+    form_widget: EinkaufHeadFormWidget-Instanz.
+    items_widget: EinkaufItemsTableWidget-Instanz.
+    settings_manager: SettingsManager-Instanz.
+    payload: Aktueller Einkauf-Payload.
+    db: Optionale bestehende DB-Verbindung.
+    review_widget: Optionales OrderReviewPanelWidget fuer kompakte Review-Anzeige.
+    no_bestellnummer_message: Optionaler Text fuer den Leerfall ohne Bestellnummer.
+    error_message: Optionaler Text fuer Fehler-/Leerfaelle.
+    hydrate_existing_order: Wenn True, werden bestehende DB-Daten in Widgets geladen.
+    ean_callback: Optionaler Callback fuer lokale EAN-Aufloesung bei Existing-Waren.
+    payload_target: Optionales Dict, das bei Existing-Order-Hydration aktualisiert wird.
+
+  Returns:
+    dict:
+      'bundle': dict|None - Review-Bundle bei Erfolg.
+      'db': Aktualisierte DB-Verbindung.
+      'status': 'ok' | 'no_bestellnummer' | 'error'
+      'order_exists': bool - True wenn Bundle eine bestehende Bestellung enthaelt.
+      'hydrated_payload': dict|None - Geladener Existing-Payload falls angefordert.
+  """
+  result = build_order_review_safe(
+    form_widget, items_widget, settings_manager, payload, db=db,
+  )
+  db = result.get("db", db)
+  bundle = result.get("bundle")
+  status = result.get("status", "error")
+
+  if not bundle:
+    if review_widget is not None:
+      if status == "no_bestellnummer":
+        review_widget.clear_review(
+          no_bestellnummer_message
+          or "Noch keine Bestellnummer erkannt. Die Pruefung startet, sobald eine Nummer vorhanden ist."
+        )
+      else:
+        review_widget.clear_review(
+          error_message or "Aenderungspruefung momentan nicht verfuegbar."
+        )
+    return {
+      "bundle": None,
+      "db": db,
+      "status": status,
+      "order_exists": False,
+      "hydrated_payload": None,
+    }
+
+  order_preview = bundle.get("order_preview", {}) if isinstance(bundle, dict) else {}
+  order_exists = bool(order_preview.get("order_exists"))
+  hydrated_payload = None
+
+  if hydrate_existing_order:
+    if not order_exists:
+      clear_einkauf_review_data(form_widget, items_widget)
+      return {
+        "bundle": bundle,
+        "db": db,
+        "status": status,
+        "order_exists": False,
+        "hydrated_payload": None,
+      }
+
+    existing_order = order_preview.get("existing_order", {})
+    existing_waren = order_preview.get("existing_waren", [])
+    hydrated_payload = dict(existing_order) if isinstance(existing_order, dict) else {}
+
+    if existing_order:
+      form_widget.set_payload(existing_order)
+
+    if existing_waren:
+      hydrated_payload["waren"] = [dict(w) for w in existing_waren]
+      items_widget.set_items(
+        existing_waren,
+        ean_fill_callback=ean_callback,
+        payload=hydrated_payload or payload,
+      )
+
+    if isinstance(payload_target, dict):
+      payload_target.clear()
+      payload_target.update(hydrated_payload)
+
+  set_einkauf_review_data(form_widget, items_widget, bundle)
+  if review_widget is not None:
+    review_widget.set_review_data(bundle)
+
+  return {
+    "bundle": bundle,
+    "db": db,
+    "status": status,
+    "order_exists": order_exists,
+    "hydrated_payload": hydrated_payload,
+  }
+
+
 def save_einkauf_workflow(parent_widget, settings_manager, payload, items_widget,
                           inputs_dict, payload_dict, db=None, review_bundle=None,
                           skip_existing_review=False, text_fn=None):
@@ -710,3 +889,104 @@ def save_einkauf_workflow(parent_widget, settings_manager, payload, items_widget
     "db": db,
     "renamed": bool(save_result.get("renamed")),
   }
+
+
+def prepare_and_save_einkauf_workflow(parent_widget, settings_manager,
+                                      form_widget, items_widget, inputs_dict,
+                                      base_payload=None, payload_dict=None,
+                                      db=None, review_bundle=None,
+                                      skip_existing_review=False, text_fn=None,
+                                      payload_enricher=None,
+                                      validate_waren=True):
+  """Fuehrt Pre-Save-Vorbereitung und Save-Workflow in einem Ablauf aus.
+
+  Nutzt prepare_einkauf_save() fuer Payload + Validierung und fuehrt bei
+  erfolgreicher Vorbereitung direkt den gemeinsamen Save-Workflow aus.
+
+  Args:
+    parent_widget: Eltern-Widget fuer Dialoge.
+    settings_manager: SettingsManager-Instanz.
+    form_widget: EinkaufHeadFormWidget-Instanz.
+    items_widget: EinkaufItemsTableWidget-Instanz.
+    inputs_dict: Widget-Dict fuer Order-Number-Callback.
+    base_payload: Optionaler Basis-Payload fuer prepare_einkauf_save().
+    payload_dict: Optionales Payload-Dict fuer Order-Number-Callback-Update.
+    db: Optionale bestehende DB-Verbindung.
+    review_bundle: Optionales Review-Bundle fuer Bestaetigungsdialog.
+    skip_existing_review: Wenn True, wird kein erneuter Review-Dialog gezeigt.
+    text_fn: Optionale Text-Normalisierungsfunktion fuer Order-Number-Callback.
+    payload_enricher: Optionaler Callback zur finalen Payload-Anreicherung.
+    validate_waren: Wenn True, werden Artikel ueber prepare_einkauf_save() validiert.
+
+  Returns:
+    dict:
+      'status': 'invalid' | 'cancelled' | 'saved'
+      'issues': list[str] - Validierungsprobleme aus der Pre-Save-Phase.
+      'payload': dict - Vorbereiteter Payload.
+      'save_result': dict|None - Rohes Pipeline-Save-Ergebnis.
+      'post_save': dict|None - Post-Save-Ergebnis.
+      'db': Aktualisierte DB-Verbindung.
+      'renamed': bool - Ob die Bestellnummer umbenannt wurde.
+  """
+  if validate_waren:
+    payload, issues = prepare_einkauf_save(
+      form_widget, items_widget, base_payload=base_payload,
+    )
+  else:
+    payload = collect_einkauf_payload(
+      form_widget, items_widget, base_payload=base_payload,
+    )
+    issues = []
+  if callable(payload_enricher):
+    enriched = payload_enricher(payload)
+    if isinstance(enriched, dict):
+      payload = enriched
+
+  if issues:
+    return {
+      "status": "invalid",
+      "issues": issues,
+      "payload": payload,
+      "save_result": None,
+      "post_save": None,
+      "db": db,
+      "renamed": False,
+    }
+
+  result = save_einkauf_workflow(
+    parent_widget, settings_manager, payload,
+    items_widget, inputs_dict, payload_dict or payload,
+    db=db, review_bundle=review_bundle,
+    skip_existing_review=skip_existing_review, text_fn=text_fn,
+  )
+  result["issues"] = []
+  result["payload"] = payload
+  return result
+
+
+def reset_einkauf_review_workflow(form_widget, items_widget, banner_widget=None,
+                                  clear_review=False, review_widget=None,
+                                  review_message=None):
+  """Setzt den Einkaufspfad zurueck und leert optional auch ein Review-Panel.
+
+  Nutzt die bestehende Reset-Phase fuer Formular, Artikelliste und Banner
+  und kann zusaetzlich eine kompakte Review-Anzeige zuruecksetzen.
+
+  Args:
+    form_widget: EinkaufHeadFormWidget-Instanz.
+    items_widget: EinkaufItemsTableWidget-Instanz.
+    banner_widget: Optionales SummenBannerWidget.
+    clear_review: Wenn True, werden auch Widget-Review-Daten entfernt.
+    review_widget: Optionales OrderReviewPanelWidget.
+    review_message: Optionaler Leertext fuer das Review-Panel.
+  """
+  reset_einkauf_phase(
+    form_widget, items_widget,
+    banner_widget=banner_widget,
+    clear_review=clear_review,
+  )
+  if review_widget is not None:
+    if review_message is None:
+      review_widget.clear_review()
+    else:
+      review_widget.clear_review(review_message)

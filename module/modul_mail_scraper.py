@@ -49,11 +49,10 @@ from module.einkauf_pipeline import EinkaufPipeline
 from module.einkauf_ui import EinkaufHeadFormWidget, EinkaufItemsTableWidget, OrderReviewPanelWidget, SummenBannerWidget
 from module.shared_einkauf_review import (
   collect_einkauf_payload,
-  set_einkauf_review_data,
-  populate_einkauf_phase,
   build_einkauf_status_report,
-  build_order_review_safe,
-  save_einkauf_workflow,
+  apply_einkauf_review_workflow,
+  refresh_einkauf_review_workflow,
+  prepare_and_save_einkauf_workflow,
 )
 from module.normalization_dialog import NormalizationPanel
 from module.amazon_country_dialog import AmazonCountryPanel
@@ -2619,14 +2618,22 @@ class ScraperReviewWizardDialog(QDialog):
     if isinstance(payload, dict):
       merged.update(payload)
     self._set_current_mail_data(merged)
-    populate_einkauf_phase(
+    result = apply_einkauf_review_workflow(
       self.einkauf_form_widget,
       self.einkauf_items_widget,
       self.summen_banner,
       merged,
+      settings_manager=self.settings_manager,
       ean_callback=self.ean_service.find_best_local_ean_by_name,
+      db=self._shared_db,
+      refresh_review=True,
+      review_widget=self.order_review_widget,
+      no_bestellnummer_message="Noch keine Bestellnummer erkannt. Die Pruefung startet, sobald eine Nummer vorhanden ist.",
+      error_message="Aenderungspruefung momentan nicht verfuegbar.",
+      extra_checks=[("Mapping erledigt", self._mapping_done_by_index.get(self.current_index, False))],
     )
-    self._refresh_order_review()
+    self._shared_db = result["db"]
+    self._current_order_review_bundle = result["review_bundle"]
 
   def _clear_mapping_panel(self):
     while self.mapping_panel_host.count():
@@ -3333,22 +3340,19 @@ class ScraperReviewWizardDialog(QDialog):
     except Exception:
       payload = dict(self._current_mail_record())
 
-    result = build_order_review_safe(
-      self.einkauf_form_widget, self.einkauf_items_widget,
-      self.settings_manager, payload, db=self._shared_db,
+    result = refresh_einkauf_review_workflow(
+      self.einkauf_form_widget,
+      self.einkauf_items_widget,
+      self.settings_manager,
+      payload,
+      db=self._shared_db,
+      review_widget=self.order_review_widget,
+      no_bestellnummer_message="Noch keine Bestellnummer erkannt. Die Pruefung startet, sobald eine Nummer vorhanden ist.",
+      error_message="Aenderungspruefung momentan nicht verfuegbar.",
     )
     self._shared_db = result["db"]
-    bundle = result["bundle"]
-    self._current_order_review_bundle = bundle
-
-    if bundle:
-      set_einkauf_review_data(self.einkauf_form_widget, self.einkauf_items_widget, bundle)
-      self.order_review_widget.set_review_data(bundle)
-    elif result["status"] == "no_bestellnummer":
-      self.order_review_widget.clear_review("Noch keine Bestellnummer erkannt. Die Pruefung startet, sobald eine Nummer vorhanden ist.")
-    else:
-      self.order_review_widget.clear_review("Aenderungspruefung momentan nicht verfuegbar.")
-    return bundle
+    self._current_order_review_bundle = result["bundle"]
+    return result["bundle"]
 
   def _collect_current_payload(self):
     return collect_einkauf_payload(
@@ -3535,13 +3539,21 @@ class ScraperReviewWizardDialog(QDialog):
 
       # 3. Save-Workflow: Review + Pipeline-Save + Post-Save
       review_bundle = self._refresh_order_review()
-      result = save_einkauf_workflow(
-        self, self.settings_manager, payload,
-        self.einkauf_items_widget, self.inputs, payload,
+      result = prepare_and_save_einkauf_workflow(
+        self,
+        self.settings_manager,
+        self.einkauf_form_widget,
+        self.einkauf_items_widget,
+        self.inputs,
+        base_payload=payload,
+        payload_dict=payload,
         db=self._shared_db, review_bundle=review_bundle,
         skip_existing_review=True, text_fn=self._safe_text,
+        validate_waren=False,
       )
       self._shared_db = result["db"]
+      if result["issues"]:
+        return
 
       if result["status"] != "saved":
         return
