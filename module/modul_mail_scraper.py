@@ -49,7 +49,6 @@ from module.einkauf_pipeline import EinkaufPipeline
 from module.einkauf_ui import EinkaufHeadFormWidget, EinkaufItemsTableWidget, OrderReviewPanelWidget, SummenBannerWidget
 from module.shared_einkauf_review import (
   collect_einkauf_payload,
-  build_einkauf_status_report,
   apply_einkauf_review_workflow,
   prepare_and_save_einkauf_workflow,
 )
@@ -1987,6 +1986,7 @@ class ScraperReviewWizardDialog(QDialog):
     self._mapping_state_by_index = {}
     self._active_mapping_panel = None
     self._current_order_review_bundle = None
+    self._current_einkauf_report = None
     self._current_rechnung_pdf_path = ""
     self.summary = {
       "saved": 0,
@@ -2633,6 +2633,7 @@ class ScraperReviewWizardDialog(QDialog):
     )
     self._shared_db = result["db"]
     self._current_order_review_bundle = result["review_bundle"]
+    self._current_einkauf_report = result["report"]
     return result
 
   def _clear_mapping_panel(self):
@@ -3479,13 +3480,12 @@ class ScraperReviewWizardDialog(QDialog):
       else:
         self.lbl_auto_mapping_log.setText("Keine automatischen Mappings.")
 
-      # Warnungen + Validierungs-Checkliste via Status-Report-Phase
-      report = build_einkauf_status_report(
-        self.einkauf_form_widget,
-        self.einkauf_items_widget,
-        item,
-        extra_checks=[("Mapping erledigt", self._mapping_done_by_index.get(self.current_index, False))],
-      )
+      # Warnungen + Validierungs-Checkliste kommen bevorzugt aus dem
+      # zentralen Apply-Workflow des Einkaufspfads.
+      report = self._current_einkauf_report or {
+        "warnings": [],
+        "checklist_text": "",
+      }
       warnings = report["warnings"]
       self.lbl_warnings.setText("\n".join(warnings) if warnings else "Keine Warnungen.")
       self.lbl_warnings.setStyleSheet(
