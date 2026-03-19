@@ -20,7 +20,8 @@ import tempfile
 import shutil
 import traceback
 
-from module.gemini_api import process_receipt_with_gemini
+from module.gemini_api import classify_ai_provider_error, process_receipt_with_gemini
+from module.ai.provider_settings import get_ai_provider_label
 from module.scan_input_preprocessing import prepare_order_entry_scan
 from module.database_manager import DatabaseManager
 from module.custom_msgbox import CustomMsgBox
@@ -69,10 +70,13 @@ class GeminiWorker(QThread):
     finished_signal = pyqtSignal(dict)
     error_signal = pyqtSignal(str)
 
-    def __init__(self, api_key, prepared_scan):
+    def __init__(self, api_key, prepared_scan, provider_name="gemini", provider_profile_name="", provider_profile_overrides=None):
         super().__init__()
         self.api_key = api_key
         self.prepared_scan = prepared_scan
+        self.provider_name = str(provider_name or "gemini")
+        self.provider_profile_name = str(provider_profile_name or "")
+        self.provider_profile_overrides = dict(provider_profile_overrides or {}) if isinstance(provider_profile_overrides, dict) else {}
 
     def run(self):
         try:
@@ -84,16 +88,19 @@ class GeminiWorker(QThread):
                 scan_mode=self.prepared_scan.scan_mode,
                 prompt_plan=self.prepared_scan.prompt_plan,
                 scan_decision=scan_decision_dict,
+                provider_name=self.provider_name,
+                provider_profile_name=self.provider_profile_name,
+                provider_profile_overrides=self.provider_profile_overrides,
             )
             self.finished_signal.emit(result or {})
         except Exception as e:
-            app_error = e if isinstance(e, AppError) else classify_gemini_error(e, phase="order_entry_scan")
+            app_error = e if isinstance(e, AppError) else classify_ai_provider_error(e, provider_name=self.provider_name, phase="order_entry_scan")
             log_classified_error(
                 f"{__name__}.GeminiWorker.run",
                 app_error.category if isinstance(app_error, AppError) else "unknown",
                 app_error.user_message if isinstance(app_error, AppError) else str(e),
                 status_code=app_error.status_code if isinstance(app_error, AppError) else None,
-                service=app_error.service if isinstance(app_error, AppError) else "gemini",
+                service=app_error.service if isinstance(app_error, AppError) else self.provider_name,
                 exc=e,
                 extra={
                     "scan_mode": self.prepared_scan.scan_mode,
@@ -607,9 +614,11 @@ class OrderEntryApp(QWidget):
         self.btn_scan.setEnabled(has_image or has_file or has_text)
 
     def _start_scan(self):
-        api_key = self.settings_manager.get("gemini_api_key", "")
+        provider_name = self.settings_manager.get_active_ai_provider()
+        api_key = self.settings_manager.get_active_ai_api_key()
         if not api_key:
-            CustomMsgBox.warning(self, "API Key fehlt", "Bitte trage deinen Gemini API Key in den Einstellungen ein!")
+            provider_label = get_ai_provider_label(provider_name)
+            CustomMsgBox.warning(self, "API Key fehlt", f"Bitte trage deinen {provider_label} API Key in den Einstellungen ein!")
             return
 
         custom_text = self.txt_anweisung.toPlainText().strip()
@@ -648,7 +657,13 @@ class OrderEntryApp(QWidget):
             self.loading_overlay = LoadingOverlay(self)
         self.loading_overlay.start("Dokument wird analysiert...")
 
-        self.gemini_worker = GeminiWorker(api_key, prepared_scan)
+        self.gemini_worker = GeminiWorker(
+            api_key,
+            prepared_scan,
+            provider_name=provider_name,
+            provider_profile_name=self.settings_manager.get_ai_profile_name(provider_name),
+            provider_profile_overrides=self.settings_manager.get_ai_profile_overrides(provider_name),
+        )
         self.gemini_worker.finished_signal.connect(self._on_ai_finished)
         self.gemini_worker.error_signal.connect(self._on_ai_error)
         self.gemini_worker.start()

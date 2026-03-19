@@ -11,6 +11,8 @@ from typing import Any
 
 from PyQt6.QtGui import QImage
 
+from module.ai import build_provider_profile
+from module.crash_logger import log_mail_scan_trace
 from module.media.media_keys import extract_sender_domain
 from module.scan_planner import plan_scan_from_context
 from module.scan_profile_catalog import ScanDecision
@@ -302,6 +304,40 @@ class PreparedScanInput:
                 if not source_stage or source_stage != cleanup_stage:
                     continue
             yield source.file_path
+
+
+@dataclass
+class MailScanPreplan:
+    provider_name: str = ""
+    provider_profile_name: str = ""
+    provider_profile_overrides: dict[str, Any] = field(default_factory=dict)
+    input_category: str = "mail_text_only"
+    requires_screenshot: bool = False
+    rendering_strategy: str = "skip_screenshot"
+    primary_source_type: str = "email_message"
+    secondary_source_type: str = ""
+    status_label: str = ""
+    status_text: str = ""
+    decision_reason: str = ""
+    source_plan: dict[str, Any] = field(default_factory=dict)
+    attachment_score_cache: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "provider_name": str(self.provider_name or ""),
+            "provider_profile_name": str(self.provider_profile_name or ""),
+            "provider_profile_overrides": dict(self.provider_profile_overrides or {}),
+            "input_category": str(self.input_category or "mail_text_only"),
+            "requires_screenshot": bool(self.requires_screenshot),
+            "rendering_strategy": str(self.rendering_strategy or "skip_screenshot"),
+            "primary_source_type": str(self.primary_source_type or ""),
+            "secondary_source_type": str(self.secondary_source_type or ""),
+            "status_label": str(self.status_label or ""),
+            "status_text": str(self.status_text or ""),
+            "decision_reason": str(self.decision_reason or ""),
+            "source_plan": dict(self.source_plan or {}),
+            "attachment_score_cache": dict(self.attachment_score_cache or {}),
+        }
 
 
 class _HtmlLinkExtractor(HTMLParser):
@@ -725,6 +761,118 @@ def _score_pdf_attachment(raw_email, attachment):
     }
 
 
+def _normalize_mail_preplan(preplan):
+    if isinstance(preplan, MailScanPreplan):
+        return preplan.to_dict()
+    if isinstance(preplan, dict):
+        return dict(preplan)
+    return {}
+
+
+def _trace_mail_plan(message, extra=None):
+    payload = dict(extra or {}) if isinstance(extra, dict) else {"detail": str(extra or "")}
+    log_mail_scan_trace("scan_input_preprocessing", message, extra=payload)
+
+
+def _build_attachment_score_cache(attachment_sources):
+    cache = {}
+    for source in list(attachment_sources or []):
+        if not isinstance(source, ScanSource):
+            continue
+        file_path = str(getattr(source, "file_path", "") or "").strip()
+        if not file_path:
+            continue
+        cache[file_path] = {
+            "score": int(source.extras.get("pdf_relevance_score", 0) or 0),
+            "is_relevant": bool(source.extras.get("pdf_is_relevant", False)),
+            "reason": str(source.extras.get("pdf_relevance_reason", "") or ""),
+            "text_hint": str(source.extras.get("pdf_text_hint", "") or ""),
+            "classification": str(source.extras.get("pdf_classification", "") or "weak_pdf_attachment"),
+            "page_count": int(source.extras.get("pdf_page_count", 0) or 0),
+            "metadata_title": str(source.extras.get("pdf_metadata_title", "") or ""),
+            "metadata_subject": str(source.extras.get("pdf_metadata_subject", "") or ""),
+        }
+    return cache
+
+
+def _resolve_mail_profile_policy(provider_name="", provider_profile_name="", provider_profile_overrides=None):
+    try:
+        profile = build_provider_profile(
+            provider_name=str(provider_name or "").strip().lower(),
+            profile_name=str(provider_profile_name or "").strip(),
+            transport="native",
+            overrides=dict(provider_profile_overrides or {}) if isinstance(provider_profile_overrides, dict) else None,
+        )
+    except Exception:
+        return {
+            "provider_name": str(provider_name or "").strip().lower(),
+            "profile_name": str(provider_profile_name or "").strip(),
+            "preferred_input_strategy": "auto",
+            "screenshot_aggressiveness": "balanced",
+            "text_only_fallback": "when_no_file",
+            "upload_conservatism": "balanced",
+            "allow_additional_upload_pass": False,
+            "prefer_single_pass": True,
+            "max_upload_calls_per_item": 1,
+            "status_hints": {},
+        }
+
+    input_policy = getattr(getattr(profile, "policy", None), "input", None)
+    cost_policy = getattr(getattr(profile, "policy", None), "cost", None)
+    return {
+        "provider_name": str(getattr(profile, "provider_name", "") or "").strip().lower(),
+        "profile_name": str(getattr(profile, "profile_name", "") or "").strip(),
+        "preferred_input_strategy": str(getattr(input_policy, "preferred_input_strategy", "auto") or "auto"),
+        "screenshot_aggressiveness": str(getattr(input_policy, "screenshot_aggressiveness", "balanced") or "balanced"),
+        "text_only_fallback": str(getattr(input_policy, "text_only_fallback", "when_no_file") or "when_no_file"),
+        "upload_conservatism": str(getattr(input_policy, "upload_conservatism", "balanced") or "balanced"),
+        "allow_additional_upload_pass": bool(getattr(input_policy, "allow_additional_upload_pass", False)),
+        "prefer_single_pass": bool(getattr(cost_policy, "prefer_single_pass", True)),
+        "max_upload_calls_per_item": int(getattr(cost_policy, "max_upload_calls_per_item", 1) or 1),
+        "status_hints": dict(getattr(profile, "status_hints", {}) or {}),
+    }
+
+
+def _estimate_mail_visual_need(raw_email, mail_source, mail_eval, screenshot_aggressiveness="balanced"):
+    raw_email = dict(raw_email or {})
+    mail_eval = dict(mail_eval or {})
+    html_text = str(raw_email.get("body_html", "") or "")
+    plain_text = _clean_whitespace(raw_email.get("body_text", ""))
+    cleaned_html_text = _strip_html_quick(html_text)
+    image_hints = list((getattr(mail_source, "extras", {}) or {}).get("image_hints", []) or [])
+    tracking_links = list((getattr(mail_source, "extras", {}) or {}).get("tracking_links", []) or [])
+
+    score = 0
+    reasons = []
+    if image_hints:
+        score += 2
+        reasons.append("Mail scheint bildgetriebene Produktbereiche zu haben")
+    if html_text and len(html_text) >= max(900, len(cleaned_html_text) * 2) and len(plain_text) < 260:
+        score += 2
+        reasons.append("HTML-Struktur ist deutlich reicher als der bereinigte Text")
+    if "<table" in html_text.lower():
+        score += 1
+        reasons.append("Mail nutzt Tabellenlayout")
+    if len(tracking_links) >= 2 and len(plain_text) < 220:
+        score += 1
+        reasons.append("Mail hat eher Link-/Button-Struktur als klaren Text")
+    if not bool(mail_eval.get("is_useful", False)) and html_text:
+        score += 1
+        reasons.append("Mailtext allein wirkt schwach")
+
+    threshold = {
+        "low": 4,
+        "balanced": 3,
+        "high": 2,
+    }.get(str(screenshot_aggressiveness or "balanced").strip().lower(), 3)
+    needs_screenshot = bool(score >= threshold)
+    return {
+        "score": int(score),
+        "needs_screenshot": needs_screenshot,
+        "reason": ", ".join(dict.fromkeys(reasons)) if reasons else "Bereinigter Mailtext wirkt ausreichend stabil",
+    }
+
+
 def _describe_source(source):
     if source is None:
         return None
@@ -899,9 +1047,157 @@ def _build_order_entry_source_plan(scan_context, primary_source=None):
     }
 
 
+def _collect_mail_scan_sources(raw_email, scan_mode="einkauf", screenshot_path=None):
+    mode = str(scan_mode or "einkauf").strip().lower() or "einkauf"
+    raw_email = dict(raw_email or {})
+    preplan_dict = _normalize_mail_preplan(raw_email.get("_mail_scan_preplan"))
+    cached_attachment_scores = dict(preplan_dict.get("attachment_score_cache", {}) or {}) if isinstance(preplan_dict.get("attachment_score_cache", {}), dict) else {}
+    tracking_links, all_links = _tracking_links_for_mail(raw_email)
+    sender_domain = extract_sender_domain(raw_email.get("sender", ""))
+    mail_source = ScanSource(
+        source_type="email_message",
+        origin_module="modul_mail_scraper",
+        file_path="",
+        original_name=_truncate(raw_email.get("subject", "E-Mail"), max_chars=120),
+        mime_type="message/rfc822",
+        scan_mode=mode,
+        metadata={
+            "temp_file": False,
+            "sender": _truncate(raw_email.get("sender", ""), max_chars=120),
+            "subject": _truncate(raw_email.get("subject", ""), max_chars=120),
+            "date": _truncate(raw_email.get("date", ""), max_chars=120),
+            "sender_domain": sender_domain,
+        },
+        extras={
+            "tracking_links": tracking_links,
+            "link_count": len(all_links),
+            "sender_domain": sender_domain,
+            "image_hints": _collect_mail_image_hints(raw_email),
+            "logo_hints": _collect_mail_logo_hints(raw_email),
+        },
+    )
 
-def _plan_mail_sources(raw_email, mail_source, screenshot_source, pdf_sources):
+    sources = [mail_source]
+    screenshot_source = None
+    if screenshot_path:
+        screenshot_asset_id = raw_email.get("_registered_screenshot_asset_id")
+        screenshot_media_key = str(raw_email.get("_registered_screenshot_media_key", "") or "")
+        screenshot_is_temp = bool(raw_email.get("_registered_screenshot_temp_file", False) or not screenshot_asset_id)
+        screenshot_source = ScanSource(
+            source_type="mail_render_screenshot",
+            origin_module="modul_mail_scraper",
+            file_path=str(screenshot_path),
+            original_name=_basename(screenshot_path, "mail_render.png"),
+            mime_type=_guess_mime_type(screenshot_path, "image/png"),
+            scan_mode=mode,
+            metadata={
+                "temp_file": screenshot_is_temp,
+                "cleanup_stage": "after_gemini" if screenshot_is_temp else "",
+                "media_asset_id": screenshot_asset_id,
+                "media_key": screenshot_media_key,
+            },
+            extras={
+                "media_asset_id": screenshot_asset_id,
+                "media_key": screenshot_media_key,
+            },
+        )
+        sources.append(screenshot_source)
+
+    attachment_sources = []
+    pdf_sources = []
+    for attachment in list(raw_email.get("attachments", []) or []):
+        file_path = str(attachment.get("file_path", "") or "").strip()
+        if not file_path:
+            continue
+        mime_type = _guess_mime_type(file_path, attachment.get("mime_type", ""))
+        score = {
+            "score": 0,
+            "is_relevant": False,
+            "reason": "kein klarer Hinweis",
+            "text_hint": "",
+            "classification": "weak_pdf_attachment",
+            "page_count": 0,
+            "metadata_title": "",
+            "metadata_subject": "",
+        }
+        if str(mime_type).lower() == "application/pdf" or str(file_path).lower().endswith(".pdf"):
+            cached_score = cached_attachment_scores.get(file_path)
+            if isinstance(cached_score, dict):
+                score = dict(cached_score)
+                _trace_mail_plan(
+                    "pdf_score_cache_hit",
+                    {
+                        "file_path": file_path,
+                        "classification": str(score.get("classification", "") or ""),
+                        "score": int(score.get("score", 0) or 0),
+                    },
+                )
+            else:
+                _trace_mail_plan("pdf_score_read_started", {"file_path": file_path})
+                score = _score_pdf_attachment(raw_email, attachment)
+                _trace_mail_plan(
+                    "pdf_score_read_finished",
+                    {
+                        "file_path": file_path,
+                        "classification": str(score.get("classification", "") or ""),
+                        "score": int(score.get("score", 0) or 0),
+                    },
+                )
+        source = ScanSource(
+            source_type="mail_attachment",
+            origin_module="modul_mail_scraper",
+            file_path=file_path,
+            original_name=_basename(attachment.get("original_name") or file_path),
+            mime_type=mime_type,
+            scan_mode=mode,
+            metadata={"temp_file": bool(attachment.get("temp_file", False)), "cleanup_stage": "after_review" if attachment.get("temp_file", False) else ""},
+            extras={
+                "size_bytes": int(attachment.get("size_bytes", 0) or 0),
+                "pdf_relevance_score": int(score.get("score", 0) or 0),
+                "pdf_is_relevant": bool(score.get("is_relevant", False)),
+                "pdf_relevance_reason": str(score.get("reason", "") or ""),
+                "pdf_text_hint": str(score.get("text_hint", "") or ""),
+                "pdf_classification": str(score.get("classification", "") or ""),
+                "pdf_page_count": int(score.get("page_count", 0) or 0),
+                "pdf_metadata_title": str(score.get("metadata_title", "") or ""),
+                "pdf_metadata_subject": str(score.get("metadata_subject", "") or ""),
+            },
+        )
+        sources.append(source)
+        attachment_sources.append(source)
+        if str(mime_type).lower() == "application/pdf" or str(file_path).lower().endswith(".pdf"):
+            pdf_sources.append(source)
+            if str(source.extras.get("pdf_classification", "") or "") == "irrelevant_pdf_attachment":
+                logging.info(
+                    "PDF-Anhang abgewertet: file=%s, reason=%s",
+                    source.original_name,
+                    str(source.extras.get("pdf_relevance_reason", "") or "kein Grund"),
+                )
+
+    pdf_sources.sort(key=lambda src: int(src.extras.get("pdf_relevance_score", 0) or 0), reverse=True)
+    return {
+        "mail_source": mail_source,
+        "screenshot_source": screenshot_source,
+        "attachment_sources": attachment_sources,
+        "pdf_sources": pdf_sources,
+        "sources": sources,
+        "tracking_links": tracking_links,
+    }
+
+
+def _plan_mail_sources(raw_email, mail_source, screenshot_source, pdf_sources, provider_name="", provider_profile_name="", provider_profile_overrides=None):
+    profile_policy = _resolve_mail_profile_policy(
+        provider_name=provider_name,
+        provider_profile_name=provider_profile_name,
+        provider_profile_overrides=provider_profile_overrides,
+    )
     mail_eval = _score_mail_content(raw_email, has_screenshot=bool(screenshot_source and screenshot_source.file_path))
+    visual_eval = _estimate_mail_visual_need(
+        raw_email,
+        mail_source,
+        mail_eval,
+        screenshot_aggressiveness=profile_policy.get("screenshot_aggressiveness", "balanced"),
+    )
     scored_pdfs = [source for source in list(pdf_sources or []) if isinstance(source, ScanSource)]
     scored_pdfs.sort(key=lambda src: int(src.extras.get("pdf_relevance_score", 0) or 0), reverse=True)
     best_pdf = next(
@@ -920,59 +1216,116 @@ def _plan_mail_sources(raw_email, mail_source, screenshot_source, pdf_sources):
     mail_visual_source = screenshot_source or mail_source
     mail_score = int(mail_eval.get("score", 0) or 0)
     pdf_score = int((best_pdf.extras.get("pdf_relevance_score", 0) if best_pdf else 0) or 0)
+    prefer_pdf = str(profile_policy.get("preferred_input_strategy", "auto") or "auto") == "pdf_first"
+    conservative_uploads = str(profile_policy.get("upload_conservatism", "balanced") or "balanced") in {"conservative", "document_first"}
+    prefer_single_pass = bool(profile_policy.get("prefer_single_pass", True))
+    allow_hybrid = bool(profile_policy.get("allow_additional_upload_pass", False)) and not conservative_uploads and not prefer_single_pass
 
-    source_classification = "mail_dominant"
-    source_scan_mode = "mail_primary"
-    primary_source = mail_visual_source
+    source_classification = "mail_text_only"
+    source_scan_mode = "mail_text_only"
+    input_category = "mail_text_only"
+    primary_source = mail_source
     secondary_source = None
+    requires_screenshot = False
+    rendering_strategy = "skip_screenshot"
+    status_label = "Text-only"
+    status_text = "Screenshot uebersprungen, bereinigter Mailtext wird zuerst verwendet."
     reasoning = []
 
     if irrelevant_pdf and not best_pdf:
-        source_classification = "irrelevant_pdf_attachment"
         reasoning.append(f"PDF '{irrelevant_pdf.original_name}' wurde als Neben-Dokument abgewertet")
 
-    if best_pdf and pdf_score >= max(8, mail_score + 3) and not mail_eval.get("is_useful"):
+    if best_pdf and visual_eval.get("needs_screenshot") and allow_hybrid:
+        source_classification = "hybrid"
+        source_scan_mode = "hybrid_full"
+        input_category = "hybrid_full"
+        requires_screenshot = True
+        rendering_strategy = "render_required"
+        status_label = "Hybrid-Scan"
+        status_text = "PDF plus Screenshot werden gezielt kombiniert."
+        if screenshot_source is not None and not prefer_pdf and visual_eval.get("score", 0) > max(3, pdf_score - mail_score):
+            primary_source = screenshot_source
+            secondary_source = best_pdf
+            reasoning.append("Visuelle Struktur ist wichtig genug fuer einen Screenshot als Primaerquelle")
+        else:
+            primary_source = best_pdf
+            secondary_source = screenshot_source if screenshot_source is not None else mail_source
+            reasoning.append(f"PDF '{best_pdf.original_name}' bleibt Hauptquelle, Screenshot liefert Zusatzsicht")
+    elif best_pdf and (prefer_pdf or pdf_score >= max(7, mail_score + 2)):
         source_classification = "pdf_dominant"
         source_scan_mode = "pdf_primary"
+        input_category = "pdf_primary"
         primary_source = best_pdf
-        secondary_source = mail_source if mail_eval.get("text_hint") else None
-        reasoning.append(f"PDF '{best_pdf.original_name}' enthaelt deutlich staerkere Bestellhinweise als die Mail")
+        secondary_source = mail_source if mail_eval.get("text_hint") and not conservative_uploads else None
+        status_label = "PDF direkt"
+        status_text = "PDF direkt, Screenshot uebersprungen."
+        reasoning.append(f"PDF '{best_pdf.original_name}' hat Vorrang")
     elif best_pdf and mail_eval.get("is_useful"):
-        source_classification = "hybrid"
-        source_scan_mode = "hybrid_mail_plus_pdf"
-        if pdf_score > mail_score + 1:
+        source_classification = "pdf_and_mail"
+        source_scan_mode = "mail_plus_pdf"
+        input_category = "mail_plus_pdf"
+        if prefer_pdf or pdf_score >= mail_score:
             primary_source = best_pdf
-            secondary_source = mail_visual_source
-            reasoning.append(f"PDF '{best_pdf.original_name}' ist staerker, Mail bleibt Zusatzkontext")
+            secondary_source = mail_source
+            reasoning.append(f"PDF '{best_pdf.original_name}' ist leicht staerker, Mail bleibt Zusatzkontext")
         else:
-            primary_source = mail_visual_source
+            primary_source = mail_source
             secondary_source = best_pdf
-            reasoning.append("Mail enthaelt sichtbare Bestellinfos und bleibt primaere Quelle")
-            reasoning.append(f"PDF '{best_pdf.original_name}' wird als Zusatzkontext mitgenommen")
+            reasoning.append("Mailtext ist stark genug, PDF bleibt gezielte Zusatzquelle")
+        status_label = "Mail + PDF"
+        status_text = "PDF eingeplant, Screenshot uebersprungen."
+    elif visual_eval.get("needs_screenshot"):
+        source_classification = "visual_mail"
+        source_scan_mode = "mail_plus_screenshot"
+        input_category = "mail_plus_screenshot"
+        requires_screenshot = True
+        rendering_strategy = "render_required"
+        primary_source = mail_visual_source
+        secondary_source = mail_source if screenshot_source is not None and mail_eval.get("text_hint") else None
+        status_label = "Screenshot noetig"
+        status_text = "Mail braucht einen Screenshot fuer die visuelle Struktur."
+        reasoning.append("Bereinigter Mailtext reicht voraussichtlich nicht aus")
     elif best_pdf and not mail_eval.get("is_useful"):
         source_classification = "pdf_dominant"
         source_scan_mode = "pdf_primary"
+        input_category = "pdf_primary"
         primary_source = best_pdf
+        status_label = "PDF direkt"
+        status_text = "Mailtext ist schwach, PDF wird direkt verwendet."
         reasoning.append(f"Mail wirkt inhaltlich schwach, PDF '{best_pdf.original_name}' wird primaer")
     else:
-        reasoning.append("Mail bleibt primaer, weil kein staerkeres PDF gefunden wurde")
+        reasoning.append("Mailtext wirkt ausreichend stabil, Screenshot wird ausgelassen")
 
     reasoning.append(str(mail_eval.get("reason", "") or ""))
+    reasoning.append(str(visual_eval.get("reason", "") or ""))
     if best_pdf:
         reasoning.append(str(best_pdf.extras.get("pdf_relevance_reason", "") or ""))
 
     return {
         "source_classification": source_classification,
         "scan_mode": source_scan_mode,
+        "input_category": input_category,
+        "requires_screenshot": bool(requires_screenshot),
+        "rendering_strategy": rendering_strategy,
+        "status_label": status_label,
+        "status_text": status_text,
         "primary_visual_source": _describe_source(primary_source),
         "secondary_context_source": _describe_source(secondary_source),
         "source_reasoning_summary": " | ".join([part for part in reasoning if str(part or "").strip()]),
         "mail_score": mail_score,
         "pdf_score": pdf_score,
+        "visual_score": int(visual_eval.get("score", 0) or 0),
         "mail_reason": str(mail_eval.get("reason", "") or ""),
         "mail_text_hint": str(mail_eval.get("text_hint", "") or ""),
         "mail_evaluation": dict(mail_eval or {}),
+        "visual_evaluation": dict(visual_eval or {}),
         "has_irrelevant_pdf_attachment": bool(irrelevant_pdf),
+        "provider_name": str(profile_policy.get("provider_name", provider_name) or provider_name or ""),
+        "provider_profile_name": str(profile_policy.get("profile_name", provider_profile_name) or provider_profile_name or ""),
+        "preferred_input_strategy": str(profile_policy.get("preferred_input_strategy", "auto") or "auto"),
+        "screenshot_aggressiveness": str(profile_policy.get("screenshot_aggressiveness", "balanced") or "balanced"),
+        "upload_conservatism": str(profile_policy.get("upload_conservatism", "balanced") or "balanced"),
+        "profile_status_hints": dict(profile_policy.get("status_hints", {}) or {}),
     }
 
 
@@ -1010,8 +1363,10 @@ def build_mail_scan_context(raw_email, scan_mode="einkauf", mail_source=None, sc
     visible_context_hints = []
     for hint in [
         str(source_plan.get("scan_mode", "") or ""),
+        str(source_plan.get("input_category", "") or ""),
         str(source_plan.get("source_classification", "") or ""),
         "mail_screenshot" if screenshot_source and screenshot_source.file_path else "",
+        "screenshot_skipped" if not bool(source_plan.get("requires_screenshot", False)) else "",
         "tracking_links" if tracking_links else "",
         "image_hints" if image_hints else "",
         "logo_hints" if logo_hints else "",
@@ -1055,10 +1410,13 @@ def build_mail_scan_context(raw_email, scan_mode="einkauf", mail_source=None, sc
             "image_hint_count": len(image_hints),
             "logo_hint_count": len(logo_hints),
             "has_screenshot": bool(screenshot_source and screenshot_source.file_path),
+            "requires_screenshot": bool(source_plan.get("requires_screenshot", False)),
             "has_secondary_source": bool(secondary_source is not None),
             "has_irrelevant_pdf_attachment": bool(source_plan.get("has_irrelevant_pdf_attachment", False)),
             "mail_score": int(source_plan.get("mail_score", 0) or 0),
             "pdf_score": int(source_plan.get("pdf_score", 0) or 0),
+            "visual_score": int(source_plan.get("visual_score", 0) or 0),
+            "input_category": str(source_plan.get("input_category", "") or ""),
         },
     )
 
@@ -1074,7 +1432,10 @@ def _build_mail_hint(raw_email, tracking_links, source_plan=None, image_hints=No
         parts.append(f"Betreff: {subject}.")
 
     if isinstance(source_plan, dict) and source_plan:
-        parts.append(f"Quellmodus: {source_plan.get('scan_mode', 'mail_primary')}.")
+        parts.append(f"Quellmodus: {source_plan.get('scan_mode', 'mail_text_only')}.")
+        input_category = _clean_whitespace(source_plan.get("input_category", ""))
+        if input_category:
+            parts.append(f"Input-Kategorie: {input_category}.")
         reasoning = _clean_whitespace(source_plan.get("source_reasoning_summary", ""))
         if reasoning:
             parts.append(f"Quellentscheidung: {reasoning}.")
@@ -1086,8 +1447,10 @@ def _build_mail_hint(raw_email, tracking_links, source_plan=None, image_hints=No
             parts.append(f"Zusatzquelle: {_clean_whitespace(secondary_row.get('original_name') or secondary_row.get('source_type') or 'Quelle')}.")
         if str(primary_row.get("source_type", "") or "") == "mail_attachment":
             parts.append("Die PDF ist die Hauptquelle fuer den Scan.")
-        elif str(source_plan.get("scan_mode", "") or "") == "hybrid_mail_plus_pdf":
-            parts.append("Die Mail ist Hauptbild, die PDF liefert Zusatzkontext.")
+        elif str(source_plan.get("input_category", "") or "") == "mail_plus_pdf":
+            parts.append("Die Mail liefert den Grundtext, die PDF gibt nur gezielten Zusatzkontext.")
+        elif str(source_plan.get("input_category", "") or "") == "hybrid_full":
+            parts.append("PDF und Screenshot werden hier bewusst kombiniert.")
 
     if tracking_links:
         parts.append("Moegliche Tracking-Links:")
@@ -1213,119 +1576,93 @@ def prepare_order_entry_scan(scan_mode, file_path=None, original_name="", mime_t
         planner_info=planner_result.to_dict(),
     )
 
+def build_mail_scan_preplan(raw_email, scan_mode="einkauf", provider_name="", provider_profile_name="", provider_profile_overrides=None):
+    mode = str(scan_mode or "einkauf").strip().lower() or "einkauf"
+    raw_email = dict(raw_email or {})
+    mail_key = str(raw_email.get("_pipeline_card_key", "") or "")
+    _trace_mail_plan(
+        "build_mail_scan_preplan_started",
+        {
+            "mail_key": mail_key,
+            "provider_name": str(provider_name or ""),
+            "provider_profile_name": str(provider_profile_name or ""),
+        },
+    )
+    source_bundle = _collect_mail_scan_sources(raw_email, scan_mode=mode, screenshot_path=None)
+    source_plan = _plan_mail_sources(
+        raw_email=raw_email,
+        mail_source=source_bundle["mail_source"],
+        screenshot_source=None,
+        pdf_sources=source_bundle["pdf_sources"],
+        provider_name=provider_name,
+        provider_profile_name=provider_profile_name,
+        provider_profile_overrides=provider_profile_overrides,
+    )
+    preplan = MailScanPreplan(
+        provider_name=str(source_plan.get("provider_name", provider_name) or provider_name or ""),
+        provider_profile_name=str(source_plan.get("provider_profile_name", provider_profile_name) or provider_profile_name or ""),
+        provider_profile_overrides=dict(provider_profile_overrides or {}) if isinstance(provider_profile_overrides, dict) else {},
+        input_category=str(source_plan.get("input_category", "mail_text_only") or "mail_text_only"),
+        requires_screenshot=bool(source_plan.get("requires_screenshot", False)),
+        rendering_strategy=str(source_plan.get("rendering_strategy", "skip_screenshot") or "skip_screenshot"),
+        primary_source_type=str((source_plan.get("primary_visual_source") or {}).get("source_type", "") or ""),
+        secondary_source_type=str((source_plan.get("secondary_context_source") or {}).get("source_type", "") or ""),
+        status_label=str(source_plan.get("status_label", "") or ""),
+        status_text=str(source_plan.get("status_text", "") or ""),
+        decision_reason=str(source_plan.get("source_reasoning_summary", "") or ""),
+        source_plan=source_plan,
+        attachment_score_cache=_build_attachment_score_cache(source_bundle.get("attachment_sources", [])),
+    )
+    _trace_mail_plan(
+        "build_mail_scan_preplan_finished",
+        {
+            "mail_key": mail_key,
+            "input_category": str(preplan.input_category or ""),
+            "requires_screenshot": bool(preplan.requires_screenshot),
+            "primary_source_type": str(preplan.primary_source_type or ""),
+            "secondary_source_type": str(preplan.secondary_source_type or ""),
+        },
+    )
+    return preplan
+
 def prepare_mail_scan(raw_email, screenshot_path=None, scan_mode="einkauf"):
     mode = str(scan_mode or "einkauf").strip().lower() or "einkauf"
     raw_email = dict(raw_email or {})
-    tracking_links, all_links = _tracking_links_for_mail(raw_email)
-    sender_domain = extract_sender_domain(raw_email.get("sender", ""))
-    mail_source = ScanSource(
-        source_type="email_message",
-        origin_module="modul_mail_scraper",
-        file_path="",
-        original_name=_truncate(raw_email.get("subject", "E-Mail"), max_chars=120),
-        mime_type="message/rfc822",
-        scan_mode=mode,
-        metadata={
-            "temp_file": False,
-            "sender": _truncate(raw_email.get("sender", ""), max_chars=120),
-            "subject": _truncate(raw_email.get("subject", ""), max_chars=120),
-            "date": _truncate(raw_email.get("date", ""), max_chars=120),
-            "sender_domain": sender_domain,
-        },
-        extras={
-            "tracking_links": tracking_links,
-            "link_count": len(all_links),
-            "sender_domain": sender_domain,
-            "image_hints": _collect_mail_image_hints(raw_email),
-            "logo_hints": _collect_mail_logo_hints(raw_email),
+    mail_key = str(raw_email.get("_pipeline_card_key", "") or "")
+    _trace_mail_plan(
+        "prepare_mail_scan_started",
+        {
+            "mail_key": mail_key,
+            "has_screenshot_path": bool(str(screenshot_path or "").strip()),
         },
     )
-
-    sources = [mail_source]
-    screenshot_source = None
-
-    if screenshot_path:
-        screenshot_asset_id = raw_email.get("_registered_screenshot_asset_id")
-        screenshot_media_key = str(raw_email.get("_registered_screenshot_media_key", "") or "")
-        screenshot_is_temp = bool(raw_email.get("_registered_screenshot_temp_file", False) or not screenshot_asset_id)
-        screenshot_source = ScanSource(
-            source_type="mail_render_screenshot",
-            origin_module="modul_mail_scraper",
-            file_path=str(screenshot_path),
-            original_name=_basename(screenshot_path, "mail_render.png"),
-            mime_type=_guess_mime_type(screenshot_path, "image/png"),
-            scan_mode=mode,
-            metadata={
-                "temp_file": screenshot_is_temp,
-                "cleanup_stage": "after_gemini" if screenshot_is_temp else "",
-                "media_asset_id": screenshot_asset_id,
-                "media_key": screenshot_media_key,
-            },
-            extras={
-                "media_asset_id": screenshot_asset_id,
-                "media_key": screenshot_media_key,
-            },
-        )
-        sources.append(screenshot_source)
-
-    attachment_sources = []
-    any_pdf_sources = []
-    for attachment in list(raw_email.get("attachments", []) or []):
-        file_path = str(attachment.get("file_path", "") or "").strip()
-        if not file_path:
-            continue
-        mime_type = _guess_mime_type(file_path, attachment.get("mime_type", ""))
-        score = {
-            "score": 0,
-            "is_relevant": False,
-            "reason": "kein klarer Hinweis",
-            "text_hint": "",
-            "classification": "weak_pdf_attachment",
-            "page_count": 0,
-            "metadata_title": "",
-            "metadata_subject": "",
-        }
-        if str(mime_type).lower() == "application/pdf" or str(file_path).lower().endswith(".pdf"):
-            score = _score_pdf_attachment(raw_email, attachment)
-        source = ScanSource(
-            source_type="mail_attachment",
-            origin_module="modul_mail_scraper",
-            file_path=file_path,
-            original_name=_basename(attachment.get("original_name") or file_path),
-            mime_type=mime_type,
-            scan_mode=mode,
-            metadata={"temp_file": bool(attachment.get("temp_file", False)), "cleanup_stage": "after_review" if attachment.get("temp_file", False) else ""},
-            extras={
-                "size_bytes": int(attachment.get("size_bytes", 0) or 0),
-                "pdf_relevance_score": int(score.get("score", 0) or 0),
-                "pdf_is_relevant": bool(score.get("is_relevant", False)),
-                "pdf_relevance_reason": str(score.get("reason", "") or ""),
-                "pdf_text_hint": str(score.get("text_hint", "") or ""),
-                "pdf_classification": str(score.get("classification", "") or ""),
-                "pdf_page_count": int(score.get("page_count", 0) or 0),
-                "pdf_metadata_title": str(score.get("metadata_title", "") or ""),
-                "pdf_metadata_subject": str(score.get("metadata_subject", "") or ""),
-            },
-        )
-        sources.append(source)
-        attachment_sources.append(source)
-        if str(mime_type).lower() == "application/pdf" or str(file_path).lower().endswith(".pdf"):
-            any_pdf_sources.append(source)
-            if str(source.extras.get("pdf_classification", "") or "") == "irrelevant_pdf_attachment":
-                logging.info(
-                    "PDF-Anhang abgewertet: file=%s, reason=%s",
-                    source.original_name,
-                    str(source.extras.get("pdf_relevance_reason", "") or "kein Grund"),
-                )
-
-    any_pdf_sources.sort(key=lambda src: int(src.extras.get("pdf_relevance_score", 0) or 0), reverse=True)
+    preplan_dict = _normalize_mail_preplan(raw_email.get("_mail_scan_preplan"))
+    provider_name = str(preplan_dict.get("provider_name", "") or "")
+    provider_profile_name = str(preplan_dict.get("provider_profile_name", "") or "")
+    provider_profile_overrides = dict(preplan_dict.get("provider_profile_overrides", {}) or {}) if isinstance(preplan_dict.get("provider_profile_overrides", {}), dict) else {}
+    source_bundle = _collect_mail_scan_sources(raw_email, scan_mode=mode, screenshot_path=screenshot_path)
+    mail_source = source_bundle["mail_source"]
+    screenshot_source = source_bundle["screenshot_source"]
+    attachment_sources = source_bundle["attachment_sources"]
+    any_pdf_sources = source_bundle["pdf_sources"]
+    sources = source_bundle["sources"]
+    tracking_links = source_bundle["tracking_links"]
 
     source_plan = _plan_mail_sources(
         raw_email=raw_email,
         mail_source=mail_source,
         screenshot_source=screenshot_source,
         pdf_sources=any_pdf_sources,
+        provider_name=provider_name,
+        provider_profile_name=provider_profile_name,
+        provider_profile_overrides=provider_profile_overrides,
     )
+    if preplan_dict:
+        source_plan["preplanned_input_category"] = str(preplan_dict.get("input_category", "") or "")
+        source_plan["preplanned_requires_screenshot"] = bool(preplan_dict.get("requires_screenshot", False))
+        source_plan["preplanned_status_label"] = str(preplan_dict.get("status_label", "") or "")
+        if bool(preplan_dict.get("requires_screenshot", False)) and not screenshot_source:
+            source_plan["status_text"] = "Screenshot war geplant, wurde aber uebersprungen oder war nicht verfuegbar."
     primary_source = _find_source_by_descriptor(
         sources,
         source_plan.get("primary_visual_source"),
@@ -1383,11 +1720,13 @@ def prepare_mail_scan(raw_email, screenshot_path=None, scan_mode="einkauf"):
     scan_context.context_flags["planner_rule"] = str(planner_result.planner_rule or "")
 
     logging.info(
-        "Mail-Quellplanung: classification=%s, scan_mode=%s, primary=%s, secondary=%s",
+        "Mail-Quellplanung: category=%s, classification=%s, scan_mode=%s, primary=%s, secondary=%s, needs_screenshot=%s",
+        source_plan.get("input_category", ""),
         source_plan.get("source_classification", ""),
         source_plan.get("scan_mode", ""),
         str((source_plan.get("primary_visual_source") or {}).get("source_type", "")),
         str((source_plan.get("secondary_context_source") or {}).get("source_type", "")),
+        bool(source_plan.get("requires_screenshot", False)),
     )
 
     logging.info(
@@ -1408,7 +1747,7 @@ def prepare_mail_scan(raw_email, screenshot_path=None, scan_mode="einkauf"):
         str((source_plan or {}).get("scan_mode", "") or ""),
     )
 
-    return PreparedScanInput(
+    prepared = PreparedScanInput(
         origin_module="modul_mail_scraper",
         scan_mode=mode,
         sources=sources,
@@ -1422,6 +1761,17 @@ def prepare_mail_scan(raw_email, screenshot_path=None, scan_mode="einkauf"):
         scan_context=scan_context.to_dict(),
         planner_info=planner_result.to_dict(),
     )
+    _trace_mail_plan(
+        "prepare_mail_scan_finished",
+        {
+            "mail_key": mail_key,
+            "input_category": str((source_plan or {}).get("input_category", "") or ""),
+            "primary_source_type": getattr(primary_source, "source_type", ""),
+            "secondary_source_type": getattr(secondary_source, "source_type", ""),
+            "has_image_path": bool(str(prepared.gemini_image_path or "").strip()),
+        },
+    )
+    return prepared
 
 
 

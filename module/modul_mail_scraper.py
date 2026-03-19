@@ -42,9 +42,12 @@ import subprocess
 import sys
 import socket
 import ssl
+import threading
 
 from module.background_tasks import BackgroundTask
-from module.gemini_api import process_receipt_with_gemini
+from module.ai import build_provider_profile
+from module.ai.provider_settings import get_ai_provider_label
+from module.gemini_api import classify_ai_provider_error, process_receipt_with_gemini
 from module.einkauf_pipeline import EinkaufPipeline
 from module.einkauf_ui import EinkaufHeadFormWidget, EinkaufItemsTableWidget, OrderReviewPanelWidget, SummenBannerWidget
 from module.shared_einkauf_review import (
@@ -56,8 +59,10 @@ from module.normalization_dialog import NormalizationPanel
 from module.amazon_country_dialog import AmazonCountryPanel
 from module.ean_service import EanService
 from module.mail_screenshot_renderer import MailScreenshotRenderJob
+from module.mail_quota_governor import MailQuotaGovernor
+from module.mail_scan_coordinator import MailScanCoordinator
 from module.mail_pipeline_ui import MailPipelineDashboardWidget
-from module.scan_input_preprocessing import prepare_mail_scan
+from module.scan_input_preprocessing import build_mail_scan_preplan, prepare_mail_scan
 from module.scan_profile_catalog import build_scan_decision_from_existing
 
 from module.crash_logger import (
@@ -65,6 +70,7 @@ from module.crash_logger import (
   classify_gemini_error,
   log_classified_error,
   log_exception,
+  log_mail_scan_trace,
 )
 from module.custom_msgbox import CustomMsgBox
 from module.lookup_service import LookupService
@@ -469,7 +475,13 @@ class MailScraperApp(QWidget):
     self._render_job = None
     self._active_scan_session_id = 0
     self.scraper_thread = None
-    self.gemini_thread = None
+    self._scan_coordinator = None
+    self._quota_governor = None
+    self._scan_runtime = self._new_scan_runtime()
+    self._active_scan_provider_name = "gemini"
+    self._active_scan_api_key = ""
+    self._active_scan_profile_name = ""
+    self._active_scan_profile_overrides = {}
 
     self.main_layout = QVBoxLayout(self)
 
@@ -626,6 +638,7 @@ class MailScraperApp(QWidget):
     self.main_layout.addWidget(log_frame)
 
     self.pipeline_dashboard.reset("Bereit fuer einen neuen Scan.")
+    self._update_pipeline_runtime_identity()
     self._log("Warte auf Verbindung...")
 
   def _log(self, message):
@@ -634,6 +647,13 @@ class MailScraperApp(QWidget):
     while self.list_log.count() > 250:
       self.list_log.takeItem(0)
     self.list_log.scrollToBottom()
+
+  def _trace_mail_scan(self, message, extra=None):
+    trace_extra = dict(extra or {}) if isinstance(extra, dict) else {"detail": str(extra or "")}
+    trace_extra.setdefault("session_id", int(self._active_scan_session_id or 0))
+    trace_extra.setdefault("provider_name", str(self._active_scan_provider_name or ""))
+    trace_extra.setdefault("profile_name", str(self._active_scan_profile_name or ""))
+    log_mail_scan_trace("modul_mail_scraper.MailScraperApp", message, extra=trace_extra)
 
   def _set_busy_hint(self, text=""):
     text = str(text or "").strip()
@@ -651,18 +671,254 @@ class MailScraperApp(QWidget):
       "cloudscan": os.path.join(base_dir, "mail_pipeline_cloudscan.svg"),
     }
 
+  def _new_scan_runtime(self, account_idx=-1):
+    return {
+      "account_idx": int(account_idx),
+      "highest_uid": 0,
+      "raw_count": 0,
+      "render_fallback_keys": set(),
+      "cloud_error_keys": set(),
+      "governor_metrics": {},
+    }
+
+  def _current_account_name(self, account_idx=None):
+    idx = self.account_combo.currentIndex() if account_idx is None else int(account_idx)
+    accounts = self.settings_manager.get("mail_accounts", [])
+    if 0 <= idx < len(accounts):
+      account = accounts[idx]
+      return str(account.get("name", "") or account.get("user", "") or f"Konto {idx + 1}")
+    return ""
+
+  def _scan_has_partial_failures(self):
+    runtime = self._scan_runtime if isinstance(self._scan_runtime, dict) else {}
+    return bool(runtime.get("render_fallback_keys") or runtime.get("cloud_error_keys"))
+
+  def _scan_partial_failure_count(self):
+    runtime = self._scan_runtime if isinstance(self._scan_runtime, dict) else {}
+    render_count = len(runtime.get("render_fallback_keys", set()) or set())
+    cloud_count = len(runtime.get("cloud_error_keys", set()) or set())
+    return int(render_count + cloud_count)
+
+  def _governor_metrics_snapshot(self):
+    runtime = self._scan_runtime if isinstance(self._scan_runtime, dict) else {}
+    metrics = runtime.get("governor_metrics", {}) if isinstance(runtime.get("governor_metrics", {}), dict) else {}
+    return dict(metrics or {})
+
+  def _log_governor_summary(self):
+    metrics = self._governor_metrics_snapshot()
+    stats = metrics.get("stats", {}) if isinstance(metrics.get("stats", {}), dict) else {}
+    if not stats:
+      return
+    self._log(
+      "Provider-Statistik: "
+      f"Requests={int(stats.get('requests_started', 0) or 0)}, "
+      f"Retries={int(stats.get('retry_count', 0) or 0)}, "
+      f"429={int(stats.get('rate_limit_events', 0) or 0)}, "
+      f"Cooldowns={int(stats.get('cooldown_events', 0) or 0)}, "
+      f"Kontingent-Ende={int(stats.get('quota_exhausted_events', 0) or 0)}, "
+      f"Zweitpass unterdrueckt={int(stats.get('second_pass_suppressed', 0) or 0)}, "
+      f"Peak-Parallelitaet={int(stats.get('peak_concurrency', 0) or 0)}"
+    )
+
+  def _active_scan_profile_for_ui(self):
+    provider_name = str(
+      self._active_scan_provider_name
+      or self.settings_manager.get_active_ai_provider()
+      or "gemini"
+    ).strip().lower() or "gemini"
+    profile_name = str(
+      self._active_scan_profile_name
+      or self.settings_manager.get_ai_profile_name(provider_name)
+      or ""
+    ).strip()
+    if isinstance(self._active_scan_profile_overrides, dict) and self._active_scan_profile_name:
+      overrides = dict(self._active_scan_profile_overrides or {})
+    else:
+      overrides = self.settings_manager.get_ai_profile_overrides(provider_name)
+    try:
+      return build_provider_profile(
+        provider_name=provider_name,
+        profile_name=profile_name,
+        overrides=overrides,
+      )
+    except Exception:
+      return None
+
+  def _pipeline_runtime_context_payload(self):
+    provider_name = str(
+      self._active_scan_provider_name
+      or self.settings_manager.get_active_ai_provider()
+      or "gemini"
+    ).strip().lower() or "gemini"
+    provider_label = get_ai_provider_label(provider_name)
+    profile = self._active_scan_profile_for_ui()
+    profile_display = ""
+    hint_parts = []
+    tooltip_parts = [
+      f"Aktiver KI-Dienst: {provider_label}.",
+      "Das konkrete Modell wird intern vom Modul festgelegt.",
+    ]
+    if profile is not None:
+      full_display = str(profile.display_name or profile.profile_name or "").strip()
+      profile_display = full_display
+      prefix = f"{provider_label} "
+      if profile_display.lower().startswith(prefix.lower()):
+        profile_display = profile_display[len(prefix):].strip()
+      tooltip_parts.insert(1, f"Aktives Profil: {full_display}.")
+      tooltip_parts.append("Das Profil steuert Quelle, Warteverhalten und den moeglichen zweiten KI-Pass.")
+      status_hints = dict(getattr(profile, "status_hints", {}) or {})
+      policy = getattr(profile, "policy", None)
+      input_policy = getattr(policy, "input", None)
+      execution_policy = getattr(policy, "execution", None)
+      second_pass_policy = getattr(policy, "second_pass", None)
+      if str(getattr(input_policy, "preferred_input_strategy", "") or "").strip().lower() == "pdf_first":
+        hint_parts.append(str(status_hints.get("pdf_preferred", "") or "").strip())
+      if (
+        bool(getattr(execution_policy, "serialize_requests", False))
+        or int(getattr(execution_policy, "max_parallel_requests", 1) or 1) <= 1
+      ):
+        hint_parts.append(str(status_hints.get("parallelism_reduced", "") or "").strip())
+      second_pass_mode = str(getattr(second_pass_policy, "mode", "") or "").strip().lower()
+      if second_pass_mode == "forbidden":
+        hint_parts.append(str(status_hints.get("second_pass_forbidden", "") or "").strip())
+      elif second_pass_mode == "conditional":
+        hint_parts.append(str(status_hints.get("second_pass_conditional", "") or "").strip())
+    clean_hints = [str(part).strip() for part in hint_parts if str(part).strip()]
+    context_text = provider_label
+    if profile_display:
+      context_text = f"{provider_label} - {profile_display}"
+    hint_text = clean_hints[0] if clean_hints else "Badge zeigt den Live-Status. Darunter steht die genutzte Quelle der Mail."
+    tooltip_text = " ".join(part for part in tooltip_parts if str(part).strip())
+    return {
+      "context_text": context_text,
+      "hint_text": hint_text,
+      "tooltip_text": tooltip_text,
+    }
+
+  def _update_pipeline_runtime_identity(self):
+    payload = self._pipeline_runtime_context_payload()
+    self.pipeline_dashboard.set_runtime_context(
+      payload.get("context_text", ""),
+      hint_text=payload.get("hint_text", ""),
+      tooltip_text=payload.get("tooltip_text", ""),
+    )
+
+  def _format_governor_monitoring(self, payload):
+    metrics = dict(payload or {}) if isinstance(payload, dict) else {}
+    if not metrics:
+      return "", ""
+    stats = metrics.get("stats", {}) if isinstance(metrics.get("stats", {}), dict) else {}
+    active_workers = int(metrics.get("active_workers", 0) or 0)
+    current_concurrency = int(metrics.get("current_concurrency", 1) or 1)
+    queued_workers = int(metrics.get("queued_workers", 0) or 0)
+    retry_count = int(stats.get("retry_count", 0) or 0)
+    rate_limit_events = int(stats.get("rate_limit_events", 0) or 0)
+    second_pass_suppressed = int(stats.get("second_pass_suppressed", 0) or 0)
+    compact_parts = [
+      f"Aktiv {active_workers}/{current_concurrency}",
+      f"Wartend {queued_workers}",
+      f"Retries {retry_count}",
+      f"429 {rate_limit_events}",
+    ]
+    if second_pass_suppressed > 0:
+      compact_parts.append(f"Zweitpass pausiert {second_pass_suppressed}")
+    if bool(metrics.get("hard_quota_active", False)):
+      compact_parts.append("Kontingent erreicht")
+    elif bool(metrics.get("cooldown_active", False)):
+      compact_parts.append("Reset wird abgewartet")
+
+    waiting_reason = str(metrics.get("waiting_reason", "") or "").strip()
+    tooltip_parts = [
+      f"Aktive Jobs: {active_workers} von {current_concurrency}.",
+      f"Wartende Jobs: {queued_workers}.",
+      f"Retries bisher: {retry_count}.",
+      f"429-Meldungen: {rate_limit_events}.",
+      f"Cooldowns: {int(stats.get('cooldown_events', 0) or 0)}.",
+      f"Peak-Parallelitaet: {int(stats.get('peak_concurrency', 0) or 0)}.",
+    ]
+    if second_pass_suppressed > 0:
+      tooltip_parts.append(f"Unterdrueckte Zweitpaesse: {second_pass_suppressed}.")
+    if waiting_reason:
+      tooltip_parts.append(f"Aktueller Wartegrund: {waiting_reason}")
+    reset_at = str(metrics.get("hard_quota_reset_at", "") or "").strip()
+    if reset_at:
+      tooltip_parts.append(f"Naechster Reset-Hinweis: {reset_at}")
+    return " | ".join(compact_parts), " ".join(part for part in tooltip_parts if str(part).strip())
+
+  def _update_pipeline_monitoring(self, payload=None):
+    metrics = dict(payload or {}) if isinstance(payload, dict) else self._governor_metrics_snapshot()
+    monitoring_text, tooltip_text = self._format_governor_monitoring(metrics)
+    self.pipeline_dashboard.set_monitoring_text(monitoring_text, tooltip_text=tooltip_text)
+
+  def _finalize_scan_without_uid_commit(self, status_text, log_message=None):
+    text = str(status_text or "").strip()
+    if text:
+      self.pipeline_dashboard.set_status_text(text)
+    if log_message:
+      self._log(str(log_message).strip())
+
+  def _commit_last_mail_uid(self):
+    runtime = self._scan_runtime if isinstance(self._scan_runtime, dict) else {}
+    highest_uid = int(runtime.get("highest_uid", 0) or 0)
+    account_idx = int(runtime.get("account_idx", -1) or -1)
+    if highest_uid <= 0 or account_idx < 0:
+      return False
+
+    accounts = self.settings_manager.get("mail_accounts", [])
+    if not (0 <= account_idx < len(accounts)):
+      return False
+
+    current_last = int(accounts[account_idx].get("last_mail_uid", 0) or 0)
+    if highest_uid <= current_last:
+      return False
+
+    accounts[account_idx]["last_mail_uid"] = highest_uid
+    self.settings_manager.save_setting("mail_accounts", accounts)
+    runtime["highest_uid"] = highest_uid
+    self._scan_runtime = runtime
+    return True
+
   def _reset_pipeline_visuals(self, message="Bereit fuer einen neuen Scan."):
     self.pipeline_dashboard.reset(message)
+    self._update_pipeline_runtime_identity()
+    self._update_pipeline_monitoring({})
 
   def _on_mail_detected(self, raw_payload, current, total):
     raw_payload = raw_payload if isinstance(raw_payload, dict) else {}
+    if self._scan_coordinator is not None:
+      self._scan_coordinator.register_detected_mail(raw_payload, current=current, total=total)
     self.pipeline_dashboard.upsert_mail(raw_payload, state_key="scanned")
     if total:
       self.pipeline_dashboard.set_stage("scan", min(1.0, float(current) / float(total)))
 
+  def _planned_input_card_state(self, raw_payload):
+    raw_payload = raw_payload if isinstance(raw_payload, dict) else {}
+    preplan = raw_payload.get("_mail_scan_preplan")
+    preplan = dict(preplan or {}) if isinstance(preplan, dict) else {}
+    category = str(preplan.get("input_category", "") or "").strip().lower()
+    if category == "pdf_primary":
+      return "pdf"
+    if category in {"mail_plus_pdf", "hybrid_full"}:
+      return "hybrid"
+    if category == "mail_text_only":
+      return "textonly"
+    return "fallback"
+
+  def _scan_state_for_runtime_phase(self, phase):
+    phase_text = str(phase or "").strip().lower()
+    if phase_text in {"waiting_retry", "waiting_reset"}:
+      return "cooldown"
+    if phase_text == "retrying":
+      return "retry"
+    if phase_text == "quota_exhausted":
+      return "quota"
+    if phase_text == "aborted":
+      return "aborted"
+    return ""
+
   def _on_cloudscan_item_status(self, payload):
     payload = payload if isinstance(payload, dict) else {}
-    raw_payload = payload.get("raw_email") if isinstance(payload.get("raw_email"), dict) else {}
+    raw_payload = dict(payload.get("raw_email") or {}) if isinstance(payload.get("raw_email"), dict) else {}
     if not raw_payload:
       raw_payload = {
         "_pipeline_card_key": payload.get("mail_key", ""),
@@ -671,22 +927,65 @@ class MailScraperApp(QWidget):
       }
 
     total = int(payload.get("total", 0) or 0)
-    current = int(payload.get("current", 0) or 0)
-    state = str(payload.get("state", "") or "").lower()
+    completed = int(payload.get("completed", 0) or 0)
+    phase = str(payload.get("phase", payload.get("state", "")) or "").lower()
+    render_finished = bool(payload.get("render_finished", False))
 
-    if total:
-      if state == "running":
-        progress = max(0.0, float(max(0, current - 1)) / float(total))
-      else:
-        progress = min(1.0, float(current) / float(total))
-      self.pipeline_dashboard.set_stage("cloudscan", progress)
+    if total and render_finished:
+      in_flight = int(payload.get("active_workers", 0) or 0)
+      progress_value = min(total, completed + in_flight)
+      self.progress_bar.setVisible(True)
+      self.progress_bar.setRange(0, total)
+      self.progress_bar.setValue(progress_value)
+      self.pipeline_dashboard.set_stage("cloudscan", min(1.0, float(progress_value) / float(total)))
 
-    if state == "running":
+    status_hint = str(payload.get("status_text", "") or "").strip()
+    if status_hint:
+      self._set_busy_hint(status_hint)
+      self.pipeline_dashboard.set_status_text(status_hint)
+      raw_payload["_ui_runtime_status_text"] = status_hint
+
+    raw_payload["_ui_runtime_phase"] = phase
+    error_message = str(payload.get("error_message", "") or "").strip()
+    if error_message:
+      raw_payload["_ui_mail_error"] = error_message
+    elif "_ui_mail_error" in raw_payload:
+      raw_payload.pop("_ui_mail_error", None)
+
+    profile_note = str(payload.get("profile_note", "") or "").strip()
+    if profile_note:
+      raw_payload["_ui_profile_note"] = profile_note
+
+    governor_payload = payload.get("governor") if isinstance(payload.get("governor"), dict) else {}
+    if governor_payload:
+      self._update_pipeline_monitoring(governor_payload)
+
+    if phase == "rendering_required":
+      self.pipeline_dashboard.set_mail_state(raw_payload, "rendering")
+    elif phase == "rendering_skipped":
+      self.pipeline_dashboard.set_mail_state(raw_payload, self._planned_input_card_state(raw_payload))
+    elif phase == "prepared":
+      self.pipeline_dashboard.set_mail_state(raw_payload, "rendered")
+    elif phase == "scan_ready":
+      self.pipeline_dashboard.set_mail_state(raw_payload, "rendered" if payload.get("screenshot_path") else self._planned_input_card_state(raw_payload))
+    elif phase == "provider_queued":
+      self.pipeline_dashboard.set_mail_state(raw_payload, "queued")
+    elif phase == "scanning":
       self.pipeline_dashboard.set_mail_state(raw_payload, "cloudscan")
-    elif state == "done":
-      self.pipeline_dashboard.set_mail_state(raw_payload, "done" if payload.get("success") else "error")
-    elif state == "error":
+    elif self._scan_state_for_runtime_phase(phase):
+      self.pipeline_dashboard.set_mail_state(raw_payload, self._scan_state_for_runtime_phase(phase))
+    elif phase == "finished":
+      if payload.get("success"):
+        self.pipeline_dashboard.set_mail_state(raw_payload, "done")
+      else:
+        self.pipeline_dashboard.set_mail_state(raw_payload, "skipped")
+    elif phase == "error":
+      runtime = self._scan_runtime if isinstance(self._scan_runtime, dict) else self._new_scan_runtime()
+      runtime.setdefault("cloud_error_keys", set()).add(str(payload.get("mail_key") or raw_payload.get("_pipeline_card_key", "") or ""))
+      self._scan_runtime = runtime
       self.pipeline_dashboard.set_mail_state(raw_payload, "error")
+    else:
+      self.pipeline_dashboard.refresh_mail(raw_payload)
 
   def _show_non_blocking_info(self, title, text):
     parent = self.window() if self.window() else self
@@ -851,7 +1150,9 @@ class MailScraperApp(QWidget):
 
   def _start_scan(self):
     host, port, user, pwd, last_uid = self._get_imap_settings()
-    api_key = self.settings_manager.get("gemini_api_key", "")
+    provider_name = self.settings_manager.get_active_ai_provider()
+    provider_label = get_ai_provider_label(provider_name)
+    api_key = self.settings_manager.get_active_ai_api_key()
     account_idx = self.account_combo.currentIndex()
 
     if not user:
@@ -859,20 +1160,40 @@ class MailScraperApp(QWidget):
       return
 
     if not api_key:
-      QMessageBox.critical(self, "Fehler", "Kein Gemini API Key gefunden! Bitte in den Einstellungen hinterlegen.")
+      QMessageBox.critical(self, "Fehler", f"Kein {provider_label} API Key gefunden! Bitte in den Einstellungen hinterlegen.")
       return
 
+    limit_text = self.combo_limit.currentText()
     self._active_scan_session_id += 1
-    self._log("Starte Suchvorgang nach neuen E-Mail Belegen...")
+    self._scan_runtime = self._new_scan_runtime(account_idx=account_idx)
+    self._active_scan_provider_name = provider_name
+    self._active_scan_api_key = str(api_key or "")
+    self._active_scan_profile_name = self.settings_manager.get_ai_profile_name(provider_name)
+    self._active_scan_profile_overrides = self.settings_manager.get_ai_profile_overrides(provider_name)
+    self._cleanup_scan_coordinator()
+    self._cleanup_quota_governor()
+    self._ensure_scan_coordinator()
+    self._update_pipeline_runtime_identity()
+    self._trace_mail_scan(
+      "scan_started",
+      {
+        "account_idx": int(account_idx),
+        "account_name": self._current_account_name(account_idx),
+        "provider_label": provider_label,
+        "mail_limit_text": str(limit_text or ""),
+        "last_mail_uid": int(last_uid or 0),
+      },
+    )
+    self._log(f"Starte Suchvorgang nach neuen E-Mail Belegen mit {provider_label}...")
     self.btn_scan.setEnabled(False)
     self.btn_connect.setEnabled(False)
     self.progress_bar.setVisible(True)
     self.progress_bar.setRange(0, 0)
     self._reset_pipeline_visuals("Postfachscan startet. Neue Mails erscheinen direkt als Karten.")
     self.pipeline_dashboard.set_stage("scan", 0.0)
+    self._update_pipeline_monitoring(self._ensure_quota_governor().snapshot())
     self._set_busy_hint("Postfach wird gelesen...")
 
-    limit_text = self.combo_limit.currentText()
     if "Alle seit" in limit_text:
       mail_limit = "SINCE_LAST"
     elif "Alle" in limit_text:
@@ -883,7 +1204,7 @@ class MailScraperApp(QWidget):
       except Exception:
         mail_limit = 5
 
-    account_name = self.account_combo.currentText()
+    account_name = self._current_account_name(account_idx)
     self.scraper_thread = MailScraperThread(host, port, user, pwd, mail_limit, last_uid, self.settings_manager, account_idx, account_name)
     self.scraper_thread.log_signal.connect(self._log)
     self.scraper_thread.progress_signal.connect(self._update_progress)
@@ -900,6 +1221,8 @@ class MailScraperApp(QWidget):
 
   def _begin_screenshot_rendering(self, raw_emails):
     self._cleanup_render_job()
+    if self._scan_coordinator is not None:
+      self._scan_coordinator.set_expected_total(len(raw_emails))
     self._log(f"Rendere {len(raw_emails)} E-Mail(s) als Screenshot fuer die KI...")
     self.progress_bar.setVisible(True)
     self.progress_bar.setRange(0, len(raw_emails))
@@ -918,6 +1241,54 @@ class MailScraperApp(QWidget):
     self._render_job.error_signal.connect(self._on_render_error)
     self._render_job.start()
 
+  def _preplan_mail_inputs(self, raw_emails):
+    planned_for_render = []
+    direct_count = 0
+
+    for raw_email in list(raw_emails or []):
+      raw_email = dict(raw_email or {})
+      mail_key = str(raw_email.get("_pipeline_card_key", "") or "")
+      preplan = build_mail_scan_preplan(
+        raw_email,
+        scan_mode="einkauf",
+        provider_name=self._active_scan_provider_name,
+        provider_profile_name=self._active_scan_profile_name,
+        provider_profile_overrides=self._active_scan_profile_overrides,
+      )
+      raw_email["_mail_scan_preplan"] = preplan.to_dict()
+      self._trace_mail_scan(
+        "mail_preplanned",
+        {
+          "mail_key": mail_key,
+          "subject": str(raw_email.get("subject", "") or "")[:120],
+          "input_category": str(preplan.input_category or ""),
+          "requires_screenshot": bool(preplan.requires_screenshot),
+          "primary_source_type": str(preplan.primary_source_type or ""),
+          "secondary_source_type": str(preplan.secondary_source_type or ""),
+          "status_text": str(preplan.status_text or ""),
+        },
+      )
+      self.pipeline_dashboard.refresh_mail(raw_email)
+
+      subject = str(raw_email.get("subject", "") or "").strip()[:60]
+      plan_text = str(preplan.status_text or preplan.status_label or preplan.input_category or "").strip()
+      if plan_text:
+        self._log(f"Vorplanung: {subject} -> {plan_text}")
+
+      if preplan.requires_screenshot:
+        planned_for_render.append(raw_email)
+      else:
+        direct_count += 1
+        if self._scan_coordinator is not None:
+          self._scan_coordinator.submit_render_result(raw_email, "")
+
+    if direct_count > 0:
+      self.pipeline_dashboard.set_status_text(
+        f"{direct_count} Mail(s) brauchen keinen Screenshot und laufen direkt weiter."
+      )
+
+    return planned_for_render
+
   def _cleanup_render_job(self):
     if self._render_job is not None:
       try:
@@ -925,6 +1296,99 @@ class MailScraperApp(QWidget):
       except Exception as exc:
         log_exception(__name__, exc)
       self._render_job = None
+
+  def _cleanup_scan_coordinator(self):
+    if self._scan_coordinator is not None:
+      try:
+        try:
+          self._scan_coordinator.log_signal.disconnect(self._log)
+        except Exception:
+          pass
+        try:
+          self._scan_coordinator.item_status_signal.disconnect(self._on_cloudscan_item_status)
+        except Exception:
+          pass
+        try:
+          self._scan_coordinator.result_signal.disconnect(self._on_scan_finished)
+        except Exception:
+          pass
+        self._scan_coordinator.cancel()
+      except Exception as exc:
+        log_exception(__name__, exc)
+      self._scan_coordinator = None
+
+  def _cleanup_quota_governor(self):
+    if self._quota_governor is not None:
+      try:
+        try:
+          self._quota_governor.status_signal.disconnect(self._on_governor_status)
+        except Exception:
+          pass
+        try:
+          self._quota_governor.metrics_signal.disconnect(self._on_governor_metrics)
+        except Exception:
+          pass
+        self._quota_governor.cancel(count_as_user_abort=False)
+      except Exception as exc:
+        log_exception(__name__, exc)
+      self._quota_governor = None
+
+  def _ensure_quota_governor(self):
+    if self._quota_governor is not None:
+      return self._quota_governor
+    self._quota_governor = MailQuotaGovernor(
+      self._active_scan_session_id,
+      provider_name=self._active_scan_provider_name,
+      profile_name=self._active_scan_profile_name,
+      profile_overrides=self._active_scan_profile_overrides,
+      parent=self,
+    )
+    self._quota_governor.status_signal.connect(self._on_governor_status)
+    self._quota_governor.metrics_signal.connect(self._on_governor_metrics)
+    return self._quota_governor
+
+  def _create_scan_worker(self, item):
+    provider_name = str(self._active_scan_provider_name or "gemini")
+    return MailScanTaskThread(
+      self._active_scan_api_key,
+      item.raw_email,
+      screenshot_path=item.screenshot_path,
+      provider_name=provider_name,
+      provider_profile_name=self._active_scan_profile_name,
+      provider_profile_overrides=self._active_scan_profile_overrides,
+      order_index=item.order_index,
+      governor=self._quota_governor,
+      parent=self,
+    )
+
+  def _ensure_scan_coordinator(self):
+    if self._scan_coordinator is not None:
+      return self._scan_coordinator
+    self._scan_coordinator = MailScanCoordinator(
+      self._active_scan_session_id,
+      self._create_scan_worker,
+      governor=self._ensure_quota_governor(),
+      parent=self,
+    )
+    self._scan_coordinator.log_signal.connect(self._log)
+    self._scan_coordinator.item_status_signal.connect(self._on_cloudscan_item_status)
+    self._scan_coordinator.result_signal.connect(self._on_scan_finished)
+    return self._scan_coordinator
+
+  def _on_governor_status(self, payload):
+    payload = payload if isinstance(payload, dict) else {}
+    status_text = str(payload.get("status_text", "") or "").strip()
+    if status_text:
+      self.pipeline_dashboard.set_status_text(status_text)
+      self._set_busy_hint(status_text)
+      self._log(status_text)
+    self._update_pipeline_monitoring()
+
+  def _on_governor_metrics(self, payload):
+    runtime = self._scan_runtime if isinstance(self._scan_runtime, dict) else self._new_scan_runtime()
+    runtime["governor_metrics"] = dict(payload or {}) if isinstance(payload, dict) else {}
+    self._scan_runtime = runtime
+    self._update_pipeline_monitoring(runtime["governor_metrics"])
 
   def _on_render_progress(self, session_id, payload):
     if session_id != self._active_scan_session_id:
@@ -946,8 +1410,31 @@ class MailScraperApp(QWidget):
 
     raw_email = payload.get("raw_email") if isinstance(payload.get("raw_email"), dict) else None
     if raw_email:
-      if payload.get("screenshot_path"):
-        self.pipeline_dashboard.set_screenshot(raw_email, str(payload.get("screenshot_path") or ""))
+      self._trace_mail_scan(
+        "render_progress",
+        {
+          "mail_key": str(payload.get("mail_key", "") or raw_email.get("_pipeline_card_key", "") or ""),
+          "current": int(payload.get("current", 0) or 0),
+          "total": int(payload.get("total", 0) or 0),
+          "status_text": status_text,
+          "screenshot_path": str(payload.get("screenshot_path", "") or ""),
+          "log_message": log_message,
+        },
+      )
+      if self._scan_coordinator is not None:
+        if "screenshot_path" in payload:
+          self._scan_coordinator.submit_render_result(raw_email, str(payload.get("screenshot_path") or ""))
+        else:
+          self._scan_coordinator.mark_rendering_started(raw_email)
+      if "screenshot_path" in payload and not payload.get("screenshot_path"):
+        runtime = self._scan_runtime if isinstance(self._scan_runtime, dict) else self._new_scan_runtime()
+        runtime.setdefault("render_fallback_keys", set()).add(str(payload.get("mail_key") or raw_email.get("_pipeline_card_key", "") or ""))
+        self._scan_runtime = runtime
+      if "screenshot_path" in payload:
+        if payload.get("screenshot_path"):
+          self.pipeline_dashboard.set_screenshot(raw_email, str(payload.get("screenshot_path") or ""))
+        else:
+          self.pipeline_dashboard.set_mail_state(raw_email, "fallback")
       else:
         self.pipeline_dashboard.set_mail_state(raw_email, "rendering")
 
@@ -956,64 +1443,111 @@ class MailScraperApp(QWidget):
       return
 
     self._render_job = None
-    self.progress_bar.setRange(0, 0)
+    self.progress_bar.setRange(0, max(1, len(screenshot_paths)))
+    self.progress_bar.setValue(0)
     self.pipeline_dashboard.set_stage("cloudscan", 0.0)
-    self._set_busy_hint("Screenshots werden von der KI analysiert...")
-    self._log(f"Sende {len(screenshot_paths)} Screenshot(s) an Gemini KI...")
-
-    api_key = self.settings_manager.get("gemini_api_key", "")
-    self.gemini_thread = GeminiEmailThread(api_key, screenshot_paths)
-    self.gemini_thread.log_signal.connect(self._log)
-    self.gemini_thread.item_status_signal.connect(self._on_cloudscan_item_status)
-    self.gemini_thread.result_signal.connect(self._on_scan_finished)
-    self.gemini_thread.start()
+    self._set_busy_hint("Scanbereite Mails werden jetzt nacheinander analysiert...")
+    self._trace_mail_scan(
+      "render_phase_finished",
+      {
+        "session_id": int(session_id or 0),
+        "result_count": len(list(screenshot_paths or [])),
+      },
+    )
+    self._log("Screenshot-Phase abgeschlossen. Bereits vorbereitete Mails fliessen direkt weiter in den KI-Scan.")
+    if self._scan_coordinator is not None:
+      self._scan_coordinator.mark_render_phase_finished()
 
   def _on_render_error(self, session_id, err_msg):
     if session_id != self._active_scan_session_id:
       return
 
     self._render_job = None
+    self._cleanup_scan_coordinator()
+    self._cleanup_quota_governor()
+    self._trace_mail_scan(
+      "render_phase_error",
+      {
+        "session_id": int(session_id or 0),
+        "error": str(err_msg or ""),
+      },
+    )
     self.progress_bar.setVisible(False)
     self.btn_scan.setEnabled(True)
     self.btn_connect.setEnabled(True)
     self._set_busy_hint("")
-    self.pipeline_dashboard.set_status_text("Screenshot-Vorbereitung fehlgeschlagen.")
+    self._finalize_scan_without_uid_commit("Screenshot-Vorbereitung fehlgeschlagen. last_mail_uid wurde nicht fortgeschrieben.")
     QMessageBox.critical(self, "Screenshot-Fehler", f"Die E-Mail-Vorbereitung ist fehlgeschlagen:\n{err_msg}")
 
   def _on_raw_emails_fetched(self, raw_emails, highest_uid, account_idx):
     self.btn_connect.setEnabled(True)
-
-    if highest_uid > 0 and account_idx >= 0:
-      accounts = self.settings_manager.get("mail_accounts", [])
-      if 0 <= account_idx < len(accounts):
-        current_last = int(accounts[account_idx].get("last_mail_uid", 0))
-        if highest_uid > current_last:
-          accounts[account_idx]["last_mail_uid"] = highest_uid
-          self.settings_manager.save_setting("mail_accounts", accounts)
+    runtime = self._scan_runtime if isinstance(self._scan_runtime, dict) else self._new_scan_runtime(account_idx=account_idx)
+    runtime["account_idx"] = int(account_idx)
+    runtime["highest_uid"] = int(highest_uid or 0)
+    runtime["raw_count"] = len(list(raw_emails or []))
+    self._scan_runtime = runtime
+    if self._scan_coordinator is not None:
+      self._scan_coordinator.set_expected_total(runtime["raw_count"])
 
     if not raw_emails:
+      self._cleanup_scan_coordinator()
+      self._cleanup_quota_governor()
       self.btn_scan.setEnabled(True)
       self.progress_bar.setVisible(False)
       self._set_busy_hint("")
       self.pipeline_dashboard.reset("Keine neuen oder verwertbaren Mails gefunden.")
       self._log("Suche beendet. Keine neuen/verwertbaren Belege gefunden.")
+      self._finalize_scan_without_uid_commit(
+        "Scan abgeschlossen. Es gab nichts zu uebernehmen; last_mail_uid wurde nicht fortgeschrieben.",
+      )
       QMessageBox.information(self, "Ergebnis", "Keine neuen Belege in den letzten E-Mails gefunden.")
       return
 
+    render_candidates = self._preplan_mail_inputs(raw_emails)
     self.btn_scan.setEnabled(False)
-    self._begin_screenshot_rendering(raw_emails)
+    if render_candidates:
+      self._begin_screenshot_rendering(render_candidates)
+      return
+
+    self.progress_bar.setVisible(True)
+    self.progress_bar.setRange(0, max(1, len(raw_emails)))
+    self.progress_bar.setValue(0)
+    self.pipeline_dashboard.set_stage("cloudscan", 0.0)
+    self._set_busy_hint("Kein Screenshot noetig. Mails werden direkt analysiert...")
+    self._log("Vorplanung abgeschlossen: Kein Screenshot noetig, Scan startet direkt mit den gewaehlten Quellen.")
+    if self._scan_coordinator is not None:
+      self._scan_coordinator.mark_render_phase_finished()
 
   def _on_scan_finished(self, extracted_data_list, highest_uid=-1, account_idx=-1):
     try:
+      self._scan_coordinator = None
       self.btn_scan.setEnabled(True)
       self.btn_connect.setEnabled(True)
       self.progress_bar.setVisible(False)
       self._set_busy_hint("")
       self.pipeline_dashboard.finish_all()
+      self._log_governor_summary()
+      governor_snapshot = self._governor_metrics_snapshot()
+      governor_stats = governor_snapshot.get("stats", {}) if isinstance(governor_snapshot.get("stats", {}), dict) else {}
+      hard_quota_hits = int(governor_stats.get("quota_exhausted_events", 0) or 0)
 
       if not extracted_data_list:
-        self.pipeline_dashboard.set_status_text("Cloudscan beendet, aber es wurden keine verwertbaren Belege erkannt.")
-        self._log("Suche beendet. Keine neuen/verwertbaren Belege gefunden.")
+        partial_count = self._scan_partial_failure_count()
+        if hard_quota_hits > 0:
+          self._finalize_scan_without_uid_commit(
+            "Scan beendet: Provider-Kontingent erreicht. Es wurde nichts weiter fortgeschrieben.",
+            "Scan wegen Kontingentende gestoppt. Fortschritt bleibt unveraendert.",
+          )
+        elif partial_count > 0:
+          self._finalize_scan_without_uid_commit(
+            f"Scan teilweise fehlgeschlagen. {partial_count} Mail(s) hatten Probleme; last_mail_uid wurde nicht fortgeschrieben.",
+            "Scan teilweise fehlgeschlagen: keine vollstaendig uebernehmbaren Belege; Fortschritt bleibt unveraendert.",
+          )
+        else:
+          self._finalize_scan_without_uid_commit(
+            "Cloudscan beendet, aber es wurden keine verwertbaren Belege erkannt. last_mail_uid wurde nicht fortgeschrieben.",
+            "Suche beendet. Keine neuen/verwertbaren Belege gefunden.",
+          )
         QMessageBox.information(self, "Ergebnis", "Keine neuen Belege in den letzten E-Mails gefunden.")
         return
 
@@ -1036,6 +1570,10 @@ class MailScraperApp(QWidget):
         if skipped_count > 0:
           self._log(f"{skipped_count} von {original_count} Mails wurden bereits verarbeitet und uebersprungen.")
           if not filtered_data_list:
+            self._finalize_scan_without_uid_commit(
+              "Alle erkannten Mails waren bereits vorhanden. last_mail_uid wurde in diesem Lauf nicht fortgeschrieben.",
+              "Keine neue Uebernahme noetig; Fortschritt bleibt unveraendert.",
+            )
             QMessageBox.information(self, "Ergebnis", f"Alle {original_count} erkannten Mails wurden bereits verarbeitet.")
             return
       except Exception as dedup_err:
@@ -1044,7 +1582,10 @@ class MailScraperApp(QWidget):
 
       dialog = ScraperReviewWizardDialog(list(reversed(filtered_data_list)), self.settings_manager, self)
       if dialog.exec() != QDialog.DialogCode.Accepted:
-        self._log("Vorgang abgebrochen: Keine weiteren E-Mails gespeichert.")
+        self._finalize_scan_without_uid_commit(
+          "Scan abgebrochen. Bereits vorgemerkte Mails wurden verworfen; last_mail_uid wurde nicht fortgeschrieben.",
+          "Vorgang abgebrochen: Der gesamte Scan gilt als verworfen.",
+        )
         return
 
       summary = dialog.get_summary()
@@ -1053,18 +1594,51 @@ class MailScraperApp(QWidget):
       discarded = int(summary.get("discarded", 0) or 0)
       renamed = int(summary.get("renamed", 0) or 0)
 
-      if saved <= 0:
-        self._log("Keine Belege gespeichert.")
-        self._show_non_blocking_info("Ergebnis", "Es wurde kein Beleg gespeichert.")
-        return
+      committed_uid = self._commit_last_mail_uid()
+      partial_count = self._scan_partial_failure_count()
+      if partial_count > 0:
+        self.pipeline_dashboard.set_status_text(
+          f"Scan abgeschlossen, aber teilweise fehlgeschlagen. {partial_count} Mail(s) hatten Probleme."
+          + (" last_mail_uid wurde fortgeschrieben." if committed_uid else " last_mail_uid wurde nicht fortgeschrieben.")
+        )
+        self._log(f"Scan teilweise fehlgeschlagen: {partial_count} Mail(s) mit Teilfehlern.")
+      elif hard_quota_hits > 0:
+        self.pipeline_dashboard.set_status_text(
+          "Scan abgeschlossen, aber das Provider-Kontingent wurde erreicht."
+          + (" last_mail_uid wurde fortgeschrieben." if committed_uid else " last_mail_uid wurde nicht fortgeschrieben.")
+        )
+        self._log("Scan endete unter Quoten- oder Tageslimit-Druck.")
+      elif committed_uid:
+        self.pipeline_dashboard.set_status_text("Scan erfolgreich abgeschlossen. last_mail_uid wurde fortgeschrieben.")
+      else:
+        self.pipeline_dashboard.set_status_text("Scan abgeschlossen, aber last_mail_uid wurde nicht fortgeschrieben.")
+        self._log("Scan abgeschlossen, aber der Fortschritt konnte nicht fortgeschrieben werden.")
 
-      info_lines = [f"Es wurden {saved} Beleg(e) gespeichert."]
+      if saved > 0:
+        info_lines = [f"Es wurden {saved} Beleg(e) gespeichert."]
+      else:
+        info_lines = ["Es wurde kein Beleg gespeichert, aber der Scan wurde abgeschlossen."]
       if skipped > 0:
         info_lines.append(f"Uebersprungen: {skipped}")
       if discarded > 0:
         info_lines.append(f"Verworfen: {discarded}")
       if renamed > 0:
         info_lines.append(f"Als neue Bestellung gespeichert (Duplikat): {renamed}")
+      if partial_count > 0:
+        info_lines.append(f"Teilweise fehlgeschlagen: {partial_count}")
+      if hard_quota_hits > 0:
+        info_lines.append("Provider-Kontingent wurde in diesem Lauf erreicht.")
+      retry_count = int(governor_stats.get("retry_count", 0) or 0)
+      rate_limit_hits = int(governor_stats.get("rate_limit_events", 0) or 0)
+      cooldown_hits = int(governor_stats.get("cooldown_events", 0) or 0)
+      if retry_count > 0 or rate_limit_hits > 0 or cooldown_hits > 0:
+        info_lines.append(
+          f"Provider-Statistik: Retries {retry_count}, 429 {rate_limit_hits}, Cooldowns {cooldown_hits}."
+        )
+      if committed_uid:
+        info_lines.append("last_mail_uid wurde fortgeschrieben.")
+      else:
+        info_lines.append("last_mail_uid wurde nicht fortgeschrieben.")
 
       self._log("Vorgang erfolgreich abgeschlossen.")
       self._show_non_blocking_info("Ergebnis", "\n".join(info_lines))
@@ -1081,31 +1655,154 @@ class MailScraperApp(QWidget):
       )
       user_msg = app_error.user_message if isinstance(app_error, AppError) else "Unbekannter Fehler im Uebernehmen-Flow."
       self._log(f"Fehler im Uebernehmen-Flow: {user_msg}")
+      self._finalize_scan_without_uid_commit(
+        "Scan fehlgeschlagen. Der Fortschritt wurde nicht fortgeschrieben.",
+      )
       QMessageBox.critical(
         self,
         "Kritischer Fehler",
         "Beim Uebernehmen ist ein Fehler aufgetreten:\n" + user_msg + "\n\nDetails stehen im zentralen Crash-Log.",
       )
+    finally:
+      self._cleanup_quota_governor()
 
   def closeEvent(self, event):
     if self._connect_task is not None and self._connect_task.isRunning():
       self._connect_task.cancel()
     self._cleanup_render_job()
+    self._cleanup_scan_coordinator()
+    self._cleanup_quota_governor()
     super().closeEvent(event)
 
-class GeminiEmailThread(QThread):
-  """Verarbeitet vorbereitete Mail-Quellen fuer Gemini, screenshot-first und sparsam."""
+class MailScanTaskThread(QThread):
+  """Verarbeitet genau eine vorbereitete Mail und gibt ein neutrales Ergebnis zurueck."""
   log_signal = pyqtSignal(str)
-  result_signal = pyqtSignal(list, int, int)
-  item_status_signal = pyqtSignal(object)
+  status_signal = pyqtSignal(object)
+  finished_signal = pyqtSignal(object)
+  PRIMARY_PROVIDER_TIMEOUT_SEC = 120
+  SECOND_PASS_PROVIDER_TIMEOUT_SEC = 90
 
-  def __init__(self, api_key, screenshot_paths):
-    super().__init__()
+  def __init__(self, api_key, raw_email, screenshot_path="", provider_name="gemini", provider_profile_name="", provider_profile_overrides=None, order_index=0, governor=None, parent=None):
+    super().__init__(parent)
     self.api_key = api_key
-    self.screenshot_paths = list(screenshot_paths or [])
+    self.raw_email = dict(raw_email or {})
+    self.screenshot_path = str(screenshot_path or "")
+    self.provider_name = str(provider_name or "gemini")
+    self.provider_profile_name = str(provider_profile_name or "")
+    self.provider_profile_overrides = dict(provider_profile_overrides or {}) if isinstance(provider_profile_overrides, dict) else {}
+    self.order_index = int(order_index or 0)
+    self.governor = governor
 
   def _safe_text(self, value):
     return str(value or "").strip()
+
+  def _trace(self, message, extra=None):
+    payload = dict(extra or {}) if isinstance(extra, dict) else {"detail": str(extra or "")}
+    payload.setdefault("mail_key", self._safe_text(self.raw_email.get("_pipeline_card_key", "")))
+    payload.setdefault("mail_uid", self._safe_text(self.raw_email.get("_mail_uid", "")))
+    payload.setdefault("provider_name", self.provider_name)
+    payload.setdefault("profile_name", self.provider_profile_name)
+    payload.setdefault("order_index", int(self.order_index or 0))
+    log_mail_scan_trace("modul_mail_scraper.MailScanTaskThread", message, extra=payload)
+
+  def _runtime_status(self, phase, status_text="", **extra):
+    payload = {
+      "phase": str(phase or "").strip().lower(),
+      "status_text": self._safe_text(status_text),
+      "mail_key": self._safe_text(self.raw_email.get("_pipeline_card_key", "")),
+      "raw_email": dict(self.raw_email or {}),
+      "order_index": int(self.order_index or 0),
+    }
+    payload.update(extra)
+    self.status_signal.emit(payload)
+
+  def _wait_for_request_slot(self, request_kind="primary"):
+    if self.governor is None:
+      return {"action": "ready", "phase": "ready", "status_text": ""}
+    wait_result = self.governor.before_request(
+      self._safe_text(self.raw_email.get("_pipeline_card_key", "")),
+      request_kind=request_kind,
+      is_cancelled=self.isInterruptionRequested,
+    )
+    phase = self._safe_text(wait_result.get("phase", ""))
+    status_text = self._safe_text(wait_result.get("status_text", ""))
+    if phase and phase != "ready":
+      self._runtime_status(
+        phase,
+        status_text=status_text,
+        wait_seconds=int(wait_result.get("wait_seconds", 0) or 0),
+        request_kind=str(request_kind or ""),
+      )
+    return wait_result
+
+  def _provider_timeout_seconds(self, request_kind="primary"):
+    request_kind = self._safe_text(request_kind).lower()
+    if request_kind == "second_pass":
+      return int(self.SECOND_PASS_PROVIDER_TIMEOUT_SEC)
+    return int(self.PRIMARY_PROVIDER_TIMEOUT_SEC)
+
+  def _call_provider_with_timeout(self, provider_call, request_kind="primary"):
+    timeout_seconds = max(15, int(self._provider_timeout_seconds(request_kind=request_kind) or 0))
+    result_box = {}
+    error_box = {}
+    started_at = time.monotonic()
+    self._trace("provider_call_started", {"request_kind": request_kind, "timeout_seconds": timeout_seconds})
+
+    def _target():
+      try:
+        result_box["value"] = provider_call()
+      except Exception as exc:
+        error_box["error"] = exc
+
+    provider_thread = threading.Thread(
+      target=_target,
+      name=f"mail-scan-provider-{request_kind}",
+      daemon=True,
+    )
+    provider_thread.start()
+    provider_thread.join(timeout_seconds)
+
+    if provider_thread.is_alive():
+      self._trace(
+        "provider_call_timeout",
+        {
+          "request_kind": request_kind,
+          "timeout_seconds": timeout_seconds,
+          "elapsed_ms": int((time.monotonic() - started_at) * 1000),
+        },
+      )
+      raise AppError(
+        category="timeout",
+        user_message=f"Die KI-Antwort dauert zu lange. Diese Mail wird nach {timeout_seconds}s neu bewertet.",
+        technical_message=f"provider watchdog timeout after {timeout_seconds}s",
+        service=self.provider_name,
+        retryable=True,
+        meta={
+          "provider_name": self.provider_name,
+          "provider_phase": self._safe_text(request_kind) or "primary",
+          "provider_error_kind": "watchdog_timeout",
+          "timeout_seconds": timeout_seconds,
+        },
+      )
+
+    if "error" in error_box:
+      self._trace(
+        "provider_call_failed",
+        {
+          "request_kind": request_kind,
+          "elapsed_ms": int((time.monotonic() - started_at) * 1000),
+          "error": self._safe_text(error_box["error"]),
+        },
+      )
+      raise error_box["error"]
+    self._trace(
+      "provider_call_finished",
+      {
+        "request_kind": request_kind,
+        "elapsed_ms": int((time.monotonic() - started_at) * 1000),
+      },
+    )
+    return result_box.get("value")
 
   def _dedupe_ordered(self, values):
     unique = []
@@ -1186,15 +1883,63 @@ class GeminiEmailThread(QThread):
 
     return self._dedupe_ordered(missing)
 
-  def _should_run_second_pass(self, prepared_scan, missing_fields):
+  def _extract_effective_profile_meta(self, result):
+    result = result if isinstance(result, dict) else {}
+    provider_meta = result.get("_provider_meta", {}) if isinstance(result.get("_provider_meta", {}), dict) else {}
+    meta = provider_meta.get("meta", {}) if isinstance(provider_meta.get("meta", {}), dict) else {}
+    effective_profile = meta.get("effective_profile", {}) if isinstance(meta.get("effective_profile", {}), dict) else {}
+    return effective_profile
+
+  def _profile_status_hint(self, profile_meta, hint_key, fallback=""):
+    profile_meta = profile_meta if isinstance(profile_meta, dict) else {}
+    status_hints = profile_meta.get("status_hints", {}) if isinstance(profile_meta.get("status_hints", {}), dict) else {}
+    return self._safe_text(status_hints.get(hint_key, fallback) or fallback)
+
+  def _should_run_second_pass(self, prepared_scan, missing_fields, profile_meta=None):
     secondary_source = getattr(prepared_scan, "secondary_source", None)
     if not secondary_source:
-      return False
+      return False, ""
     relevant_missing = set(self._dedupe_ordered(missing_fields))
     if not relevant_missing:
-      return False
+      return False, ""
+
+    profile_meta = profile_meta if isinstance(profile_meta, dict) else {}
+    policy = profile_meta.get("policy", {}) if isinstance(profile_meta.get("policy", {}), dict) else {}
+    second_pass_policy = policy.get("second_pass", {}) if isinstance(policy.get("second_pass", {}), dict) else {}
+    second_pass_mode = self._safe_text(second_pass_policy.get("mode", "")).lower()
+    max_passes = int(second_pass_policy.get("max_passes", 1) or 0)
+    if second_pass_mode == "forbidden" or max_passes <= 0:
+      return False, self._profile_status_hint(
+        profile_meta,
+        "second_pass_forbidden",
+        "Zweiter Pass durch aktives Profil unterdrueckt.",
+      )
 
     source_type = str(secondary_source.source_type or "")
+    allowed_sources = {
+      self._safe_text(item)
+      for item in list(second_pass_policy.get("allowed_source_types", []) or [])
+      if self._safe_text(item)
+    }
+    if allowed_sources and source_type not in allowed_sources:
+      return False, self._profile_status_hint(
+        profile_meta,
+        "second_pass_conditional",
+        "Aktives Profil erlaubt den zweiten Pass nur fuer passende Quellen.",
+      )
+
+    allowed_missing = {
+      self._safe_text(item)
+      for item in list(second_pass_policy.get("allowed_missing_fields", []) or [])
+      if self._safe_text(item)
+    }
+    if second_pass_mode == "conditional" and allowed_missing and not allowed_missing.intersection(relevant_missing):
+      return False, self._profile_status_hint(
+        profile_meta,
+        "second_pass_conditional",
+        "Aktives Profil erlaubt den zweiten Pass nur bei passenden Luecken.",
+      )
+
     relevant_by_source = {
       "mail_attachment": {"waren", "waren_unvollstaendig", "bestellnummer", "preise"},
       "email_message": {"waren", "waren_unvollstaendig", "bestellnummer", "tracking"},
@@ -1202,11 +1947,11 @@ class GeminiEmailThread(QThread):
     }
     useful_for = relevant_by_source.get(source_type, set())
     if not useful_for.intersection(relevant_missing):
-      return False
+      return False, ""
 
     if source_type == "mail_attachment" and not self._safe_text(secondary_source.file_path):
-      return False
-    return True
+      return False, ""
+    return True, ""
 
   def _describe_scan_source(self, source):
     if source is None:
@@ -1429,7 +2174,32 @@ class GeminiEmailThread(QThread):
 
   def _run_optional_second_pass(self, raw, prepared_scan, primary_result):
     missing_fields = self._collect_missing_fields(primary_result)
-    if not self._should_run_second_pass(prepared_scan, missing_fields):
+    profile_meta = self._extract_effective_profile_meta(primary_result)
+    self._trace(
+      "second_pass_evaluated",
+      {
+        "missing_fields": list(missing_fields or []),
+        "secondary_source_type": getattr(getattr(prepared_scan, "secondary_source", None), "source_type", ""),
+      },
+    )
+    should_run_second_pass, profile_reason = self._should_run_second_pass(prepared_scan, missing_fields, profile_meta=profile_meta)
+    secondary_source = getattr(prepared_scan, "secondary_source", None)
+    governor_reason = ""
+    if should_run_second_pass and self.governor is not None and secondary_source is not None:
+      governor_allowed, governor_reason = self.governor.allow_second_pass(
+        self._safe_text(raw.get("_pipeline_card_key", "")),
+        missing_fields=missing_fields,
+        source_type=getattr(secondary_source, "source_type", ""),
+      )
+      should_run_second_pass = bool(governor_allowed)
+    if not should_run_second_pass:
+      final_reason = self._safe_text(governor_reason or profile_reason)
+      self._trace("second_pass_skipped", {"reason": final_reason, "missing_fields": list(missing_fields or [])})
+      if final_reason:
+        logging.info("Gemini-Mail-Scan zweiter Pass unterdrueckt: %s", final_reason)
+        self._log(f" {final_reason}")
+        self.raw_email["_ui_profile_note"] = final_reason
+        self._runtime_status("second_pass_suppressed", status_text=final_reason, profile_note=final_reason)
       return primary_result, {
         "used": False,
         "missing_fields": missing_fields,
@@ -1437,10 +2207,10 @@ class GeminiEmailThread(QThread):
         "source_type": "",
         "prompt_class": "",
         "token_count": 0,
+        "reason": final_reason,
         "error": "",
       }
 
-    secondary_source = prepared_scan.secondary_source
     secondary_prompt_plan = self._build_secondary_prompt_plan(prepared_scan, missing_fields)
     secondary_scan_decision = build_scan_decision_from_existing(
       secondary_prompt_plan,
@@ -1463,14 +2233,45 @@ class GeminiEmailThread(QThread):
     self._log(f" Ergaenzungspass mit {getattr(secondary_source, 'source_type', '')} fuer fehlende Felder: {', '.join(missing_fields)}")
 
     try:
-      secondary_result = process_receipt_with_gemini(
-        self.api_key,
-        image_path=secondary_image_path,
-        custom_text=secondary_custom_text,
-        scan_mode=prepared_scan.scan_mode,
-        prompt_profile=secondary_prompt_class,
-        prompt_plan=secondary_prompt_plan,
-        scan_decision=secondary_scan_decision,
+      wait_result = self._wait_for_request_slot(request_kind="second_pass")
+      if str(wait_result.get("action", "") or "") == "quota_exhausted":
+        reason = self._safe_text(wait_result.get("status_text", "") or "Zweiter Pass wegen erreichtem Kontingent unterdrueckt.")
+        self._log(f" {reason}")
+        return primary_result, {
+          "used": False,
+          "missing_fields": missing_fields,
+          "added_fields": [],
+          "source_type": getattr(secondary_source, "source_type", ""),
+          "prompt_class": secondary_prompt_class,
+          "scan_decision": secondary_scan_decision,
+          "token_count": 0,
+          "reason": reason,
+          "error": "",
+        }
+      if str(wait_result.get("action", "") or "") == "aborted":
+        raise AppError(
+          category="unknown",
+          user_message="Scan wurde waehrend des Zweitpasses abgebrochen.",
+          technical_message="second pass aborted by user",
+          service=self.provider_name,
+          retryable=False,
+          meta={"provider_name": self.provider_name, "provider_phase": "second_pass", "provider_error_kind": "aborted"},
+        )
+
+      secondary_result = self._call_provider_with_timeout(
+        lambda: process_receipt_with_gemini(
+          self.api_key,
+          image_path=secondary_image_path,
+          custom_text=secondary_custom_text,
+          scan_mode=prepared_scan.scan_mode,
+          prompt_profile=secondary_prompt_class,
+          prompt_plan=secondary_prompt_plan,
+          scan_decision=secondary_scan_decision,
+          provider_name=self.provider_name,
+          provider_profile_name=self.provider_profile_name,
+          provider_profile_overrides=self.provider_profile_overrides,
+        ),
+        request_kind="second_pass",
       )
       secondary_tokens = int(secondary_result.pop("_token_count", 0) or 0) if isinstance(secondary_result, dict) else 0
       merged_result, added_fields = self._merge_second_pass(primary_result, secondary_result)
@@ -1478,6 +2279,14 @@ class GeminiEmailThread(QThread):
         "Gemini-Mail-Scan Merge: source_type=%s, added=%s",
         getattr(secondary_source, "source_type", ""),
         ",".join(added_fields) or "none",
+      )
+      self._trace(
+        "second_pass_finished",
+        {
+          "source_type": getattr(secondary_source, "source_type", ""),
+          "added_fields": list(added_fields or []),
+          "token_count": int(secondary_tokens or 0),
+        },
       )
       return merged_result, {
         "used": True,
@@ -1487,11 +2296,23 @@ class GeminiEmailThread(QThread):
         "prompt_class": secondary_prompt_class,
         "scan_decision": secondary_scan_decision,
         "token_count": secondary_tokens,
+        "reason": "",
         "error": "",
         "provider_meta": dict((secondary_result or {}).get("_provider_meta", {}) or {}) if isinstance(secondary_result, dict) else {},
       }
     except Exception as second_exc:
-      app_error = second_exc if isinstance(second_exc, AppError) else classify_gemini_error(second_exc, phase="mail_scraper_second_pass")
+      app_error = second_exc if isinstance(second_exc, AppError) else classify_ai_provider_error(second_exc, provider_name=self.provider_name, phase="mail_scraper_second_pass")
+      self._trace(
+        "second_pass_failed",
+        {
+          "source_type": getattr(secondary_source, "source_type", ""),
+          "error": app_error.user_message if isinstance(app_error, AppError) else str(second_exc),
+          "category": str(app_error.category or "").strip().lower() if isinstance(app_error, AppError) else "unknown",
+        },
+      )
+      if isinstance(app_error, AppError) and self.governor is not None:
+        if str(app_error.category or "").strip().lower() == "quota_exhausted":
+          self.governor.register_hard_quota_error(self._safe_text(raw.get("_pipeline_card_key", "")), app_error)
       logging.warning(
         "Gemini-Mail-Scan zweiter Pass fehlgeschlagen: source_type=%s, reason=%s",
         getattr(secondary_source, "source_type", ""),
@@ -1506,59 +2327,109 @@ class GeminiEmailThread(QThread):
         "prompt_class": secondary_prompt_class,
         "scan_decision": secondary_scan_decision,
         "token_count": 0,
+        "reason": "",
         "error": app_error.user_message if isinstance(app_error, AppError) else str(second_exc),
       }
 
   def run(self):
-    extracted_data = []
+    raw = self.raw_email if isinstance(self.raw_email, dict) else {}
+    sender = raw.get("sender", "")
+    email_date_raw = raw.get("date", "")
+    subject = raw.get("subject", "")
+    body_html = raw.get("body_html", "")
+    body_text = raw.get("body_text", "")
+    prepared_scan = None
 
-    for i, (img_path, raw) in enumerate(self.screenshot_paths):
-      raw = raw if isinstance(raw, dict) else {}
-      sender = raw.get("sender", "")
-      email_date_raw = raw.get("date", "")
-      subject = raw.get("subject", "")
-      body_html = raw.get("body_html", "")
-      body_text = raw.get("body_text", "")
-      prepared_scan = prepare_mail_scan(raw, screenshot_path=img_path, scan_mode="einkauf")
-      self.item_status_signal.emit({
-        "state": "running",
-        "current": i + 1,
-        "total": len(self.screenshot_paths),
-        "raw_email": dict(raw),
-        "mail_key": str(raw.get("_pipeline_card_key", "") or ""),
-        "subject": str(subject or ""),
-        "sender": str(sender or ""),
-      })
-      self._log(f"[{i + 1}/{len(self.screenshot_paths)}] KI analysiert: {str(subject)[:40]}...")
+    try:
+      self._trace("mail_scan_started", {"subject": str(subject or "")[:120], "sender": str(sender or "")[:120]})
+      prepared_scan = prepare_mail_scan(raw, screenshot_path=self.screenshot_path, scan_mode="einkauf")
+      self._trace(
+        "mail_scan_prepared",
+        {
+          "scan_mode": str(prepared_scan.scan_mode or ""),
+          "primary_source_type": getattr(getattr(prepared_scan, "primary_source", None), "source_type", ""),
+          "secondary_source_type": getattr(getattr(prepared_scan, "secondary_source", None), "source_type", ""),
+          "gemini_image_path": self._safe_text(prepared_scan.gemini_image_path),
+          "input_category": str((getattr(prepared_scan, "source_plan", {}) or {}).get("input_category", "") or ""),
+        },
+      )
+      self._log(f"KI analysiert: {str(subject)[:40]}...")
 
-      max_retries = 3
-      retry_count = 0
+      max_retries = self.governor.max_attempts() if self.governor is not None else 3
+      attempt_number = 0
 
-      while retry_count < max_retries:
+      while attempt_number < max_retries:
         try:
-          time.sleep(2)
+          wait_result = self._wait_for_request_slot(request_kind="primary")
+          action = self._safe_text(wait_result.get("action", "")).lower()
+          if action == "quota_exhausted":
+            self._trace("primary_wait_blocked_quota", {"status_text": self._safe_text(wait_result.get("status_text", ""))})
+            raise AppError(
+              category="quota_exhausted",
+              user_message=self._safe_text(wait_result.get("status_text", "") or "Provider-Kontingent ist erschoepft."),
+              technical_message="governor blocked request because quota is exhausted",
+              service=self.provider_name,
+              retryable=False,
+              meta={
+                "provider_name": self.provider_name,
+                "provider_phase": "primary",
+                "provider_error_kind": "quota_exhausted",
+                "quota_status": {
+                  "status": "exhausted",
+                  "retry_after_sec": int(wait_result.get("wait_seconds", 0) or 0),
+                  "reset_at": self._safe_text(wait_result.get("reset_at", "")),
+                },
+              },
+            )
+          if action == "aborted":
+            self._trace("primary_wait_aborted", {"status_text": self._safe_text(wait_result.get("status_text", ""))})
+            raise AppError(
+              category="unknown",
+              user_message="Scan wurde waehrend des Provider-Scans abgebrochen.",
+              technical_message="governor reported aborted state",
+              service=self.provider_name,
+              retryable=False,
+              meta={"provider_name": self.provider_name, "provider_phase": "primary", "provider_error_kind": "aborted"},
+            )
+
           logging.info(
-            "Gemini-Mail-Scan startet: scan_mode=%s, source_mode=%s, prompt_class=%s, primary=%s, secondary=%s",
+            "Mail-Scan startet: attempt=%s/%s, scan_mode=%s, source_mode=%s, prompt_class=%s, primary=%s, secondary=%s",
+            attempt_number + 1,
+            max_retries,
             prepared_scan.scan_mode,
             str((prepared_scan.source_plan or {}).get("scan_mode", "") or ""),
             str((prepared_scan.prompt_plan or {}).get("prompt_class", "") or ""),
             prepared_scan.primary_source.source_type if prepared_scan.primary_source else "",
             prepared_scan.secondary_source.source_type if prepared_scan.secondary_source else "",
           )
-          primary_result = process_receipt_with_gemini(
-            self.api_key,
-            image_path=prepared_scan.gemini_image_path,
-            custom_text=prepared_scan.gemini_custom_text,
-            scan_mode=prepared_scan.scan_mode,
-            prompt_profile=str((prepared_scan.prompt_plan or {}).get("prompt_class", "") or ""),
-            prompt_plan=prepared_scan.prompt_plan,
-            scan_decision=prepared_scan.scan_decision.to_dict() if getattr(prepared_scan, "scan_decision", None) else None,
+          primary_result = self._call_provider_with_timeout(
+            lambda: process_receipt_with_gemini(
+              self.api_key,
+              image_path=prepared_scan.gemini_image_path,
+              custom_text=prepared_scan.gemini_custom_text,
+              scan_mode=prepared_scan.scan_mode,
+              prompt_profile=str((prepared_scan.prompt_plan or {}).get("prompt_class", "") or ""),
+              prompt_plan=prepared_scan.prompt_plan,
+              scan_decision=prepared_scan.scan_decision.to_dict() if getattr(prepared_scan, "scan_decision", None) else None,
+              provider_name=self.provider_name,
+              provider_profile_name=self.provider_profile_name,
+              provider_profile_overrides=self.provider_profile_overrides,
+            ),
+            request_kind="primary",
           )
 
           if primary_result and isinstance(primary_result, dict):
             primary_tokens = int(primary_result.pop("_token_count", 0) or 0)
             merged_result, second_pass_info = self._run_optional_second_pass(raw, prepared_scan, primary_result)
             total_tokens = primary_tokens + int(second_pass_info.get("token_count", 0) or 0)
+            self._trace(
+              "mail_scan_provider_result",
+              {
+                "primary_tokens": int(primary_tokens or 0),
+                "total_tokens": int(total_tokens or 0),
+                "second_pass_used": bool(second_pass_info.get("used", False)),
+              },
+            )
 
             merged_result["_original_email_html"] = body_html or body_text
             merged_result["_original_email_text"] = body_text or ""
@@ -1658,75 +2529,140 @@ class GeminiEmailThread(QThread):
                 self.log_signal.emit(f" Erfolgreich extrahiert (Tokens gesamt: {total_tokens}; Pass 2: {added_text})")
               else:
                 self.log_signal.emit(f" Erfolgreich extrahiert (Tokens: {total_tokens})")
-              extracted_data.append(merged_result)
             else:
               self.log_signal.emit(f" KI fand keine relevanten Daten (Tokens: {total_tokens})")
 
-            self.item_status_signal.emit({
-              "state": "done",
-              "current": i + 1,
-              "total": len(self.screenshot_paths),
-              "raw_email": dict(raw),
+            self.finished_signal.emit({
               "mail_key": str(raw.get("_pipeline_card_key", "") or ""),
-              "subject": str(subject or ""),
-              "sender": str(sender or ""),
+              "raw_email": dict(raw),
+              "result": merged_result if has_relevant_data else None,
               "success": bool(has_relevant_data),
+              "empty": not has_relevant_data,
+              "error_message": "",
+              "order_index": self.order_index,
             })
-
-          break
+            self._trace(
+              "mail_scan_finished",
+              {
+                "success": bool(has_relevant_data),
+                "empty": not bool(has_relevant_data),
+                "second_pass_used": bool(second_pass_info.get("used", False)),
+              },
+            )
+            break
+          raise AppError(
+            category="empty_response",
+            user_message="Die KI hat keine auswertbare Antwort geliefert.",
+            technical_message="mail scan returned empty payload",
+            service=self.provider_name,
+            retryable=True,
+            meta={"provider_name": self.provider_name, "provider_phase": "primary", "provider_error_kind": "empty_response"},
+          )
 
         except Exception as e:
-          app_error = e if isinstance(e, AppError) else classify_gemini_error(e, phase="mail_scraper_scan")
+          app_error = e if isinstance(e, AppError) else classify_ai_provider_error(e, provider_name=self.provider_name, phase="mail_scraper_scan")
           log_classified_error(
-            f"{__name__}.GeminiEmailThread.run",
+            f"{__name__}.MailScanTaskThread.run",
             app_error.category if isinstance(app_error, AppError) else "unknown",
             app_error.user_message if isinstance(app_error, AppError) else str(e),
             status_code=app_error.status_code if isinstance(app_error, AppError) else None,
-            service=app_error.service if isinstance(app_error, AppError) else "gemini",
+            service=app_error.service if isinstance(app_error, AppError) else self.provider_name,
             exc=e,
             extra={
-              "mail_index": i + 1,
-              "mail_total": len(self.screenshot_paths),
+              "mail_index": self.order_index + 1,
               "subject": str(subject or "")[:120],
               "sender": str(sender or "")[:120],
-              "scan_mode": str((prepared_scan.source_plan or {}).get("scan_mode", "") or ""),
-              "prompt_class": str((prepared_scan.prompt_plan or {}).get("prompt_class", "") or ""),
-              "source_types": [source.source_type for source in prepared_scan.sources],
+              "scan_mode": str((prepared_scan.source_plan or {}).get("scan_mode", "") or "") if prepared_scan else "",
+              "prompt_class": str((prepared_scan.prompt_plan or {}).get("prompt_class", "") or "") if prepared_scan else "",
+              "source_types": [source.source_type for source in prepared_scan.sources] if prepared_scan else [],
             },
           )
           user_msg = app_error.user_message if isinstance(app_error, AppError) else str(e)
+          error_category = str(app_error.category or "").strip().lower() if isinstance(app_error, AppError) else "unknown"
+          self._trace(
+            "mail_scan_attempt_failed",
+            {
+              "attempt": int(attempt_number + 1),
+              "max_retries": int(max_retries),
+              "error_category": error_category,
+              "error_message": user_msg,
+            },
+          )
+          if isinstance(app_error, AppError) and self.governor is not None:
+            if error_category == "quota_exhausted":
+              self.governor.register_hard_quota_error(self._safe_text(raw.get("_pipeline_card_key", "")), app_error)
+              self._runtime_status("quota_exhausted", status_text=user_msg, error_category=error_category)
+            elif self.governor.should_retry(app_error, attempt_number + 1):
+              retry_plan = self.governor.register_retryable_error(
+                self._safe_text(raw.get("_pipeline_card_key", "")),
+                app_error,
+                attempt_number=attempt_number + 1,
+              )
+              attempt_number += 1
+              self._runtime_status(
+                "retrying",
+                status_text=self._safe_text(retry_plan.get("status_text", "")),
+                wait_seconds=int(retry_plan.get("wait_seconds", 0) or 0),
+                error_category=error_category,
+                attempt=attempt_number,
+              )
+              self.log_signal.emit(f" KI temporaer nicht verfuegbar: {user_msg}")
+              self.log_signal.emit(self._safe_text(retry_plan.get("status_text", "")) or f" Erneuter Versuch folgt ({attempt_number + 1}/{max_retries}).")
+              self._trace(
+                "mail_scan_retry_scheduled",
+                {
+                  "attempt": int(attempt_number),
+                  "next_attempt": int(attempt_number + 1),
+                  "wait_seconds": int(retry_plan.get("wait_seconds", 0) or 0),
+                  "error_category": error_category,
+                },
+              )
+              continue
+
           retryable = bool(isinstance(app_error, AppError) and app_error.retryable)
-          if retryable and retry_count < (max_retries - 1):
-            retry_count += 1
-            wait_s = 60 if app_error.category == "rate_limit" else 15
+          if retryable and attempt_number < (max_retries - 1):
+            attempt_number += 1
             self.log_signal.emit(f" KI temporaer nicht verfuegbar: {user_msg}")
-            self.log_signal.emit(f" Warte {wait_s}s und versuche erneut ({retry_count + 1}/{max_retries})...")
-            for t in range(wait_s, 0, -1):
-              if t % 10 == 0 or t <= 5:
-                self.log_signal.emit(f" ... {t}s verbleiben.")
-              time.sleep(1)
+            self.log_signal.emit(f" Erneuter Versuch folgt ({attempt_number + 1}/{max_retries}).")
+            self._trace(
+              "mail_scan_retry_scheduled_without_governor",
+              {
+                "attempt": int(attempt_number),
+                "next_attempt": int(attempt_number + 1),
+                "error_category": error_category,
+              },
+            )
             continue
 
           self.log_signal.emit(f" KI Fehler: {user_msg}")
-          self.item_status_signal.emit({
-            "state": "error",
-            "current": i + 1,
-            "total": len(self.screenshot_paths),
-            "raw_email": dict(raw),
+          self.finished_signal.emit({
             "mail_key": str(raw.get("_pipeline_card_key", "") or ""),
-            "subject": str(subject or ""),
-            "sender": str(sender or ""),
+            "raw_email": dict(raw),
+            "result": None,
             "success": False,
+            "empty": False,
+            "error_message": user_msg,
+            "error_category": error_category,
+            "order_index": self.order_index,
           })
+          self._trace(
+            "mail_scan_finished_with_error",
+            {
+              "error_category": error_category,
+              "error_message": user_msg,
+            },
+          )
           break
 
-      for temp_path in prepared_scan.iter_temporary_paths(cleanup_stage="after_gemini"):
-        try:
-          os.remove(temp_path)
-        except Exception:
-          pass
-
-    self.result_signal.emit(extracted_data, -1, -1)
+    finally:
+      self._trace("mail_scan_cleanup_started")
+      if prepared_scan is not None:
+        for temp_path in prepared_scan.iter_temporary_paths(cleanup_stage="after_gemini"):
+          try:
+            os.remove(temp_path)
+          except Exception:
+            pass
+      self._trace("mail_scan_cleanup_finished")
 
   def _log(self, msg):
     self.log_signal.emit(msg)
@@ -1987,6 +2923,8 @@ class ScraperReviewWizardDialog(QDialog):
     self._active_mapping_panel = None
     self._current_einkauf_report = None
     self._current_rechnung_pdf_path = ""
+    self._staged_save_records = {}
+    self._commit_in_progress = False
     self.summary = {
       "saved": 0,
       "skipped": 0,
@@ -3010,10 +3948,12 @@ class ScraperReviewWizardDialog(QDialog):
     self._load_current_mail()
 
   def _teardown_current_mail(self):
-    """Raeumt die aktuelle Mail auf (Preview-Dialoge schliessen, Assets bereinigen)."""
-    current_item = self._current_mail_record() or None
+    """Raeumt nur den UI-Zustand der aktuellen Mail auf.
+
+    Temporaere Mail-Dateien bleiben bis zum Gesamtabschluss erhalten, damit ein
+    aktiver Nutzer-Abbruch keine Teiluebernahme hinterlaesst.
+    """
     self._close_preview_dialogs()
-    self._cleanup_mail_assets(current_item)
 
   def _teardown_dialog(self):
     """Raeumt beim Schliessen des gesamten Dialogs auf."""
@@ -3464,7 +4404,7 @@ class ScraperReviewWizardDialog(QDialog):
   # ── Aktionen: Speichern / Ueberspringen / Verwerfen ─────────
 
   def _save_current_and_next(self):
-    """Speichert die aktuelle Mail und navigiert zur naechsten."""
+    """Merkt die aktuelle Mail fuer die finale Uebernahme vor und navigiert weiter."""
     try:
       # 1. Guard: Mapping muss abgeschlossen sein
       if not self._mapping_done_by_index.get(self.current_index, False):
@@ -3491,42 +4431,22 @@ class ScraperReviewWizardDialog(QDialog):
         if self._current_rechnung_pdf_path:
           payload["rechnung_pdf_pfad"] = self._current_rechnung_pdf_path
       apply_result = self._apply_payload_to_current_mail(payload)
-
-      # 3. Save-Workflow: Apply + Save + Post-Save
-      result = prepare_and_save_einkauf_workflow(
-        self,
-        self.settings_manager,
-        self.einkauf_form_widget,
-        self.einkauf_items_widget,
-        self.inputs,
-        payload_dict=apply_result["payload"],
-        db=self._shared_db,
-        review_bundle=apply_result["review_bundle"],
-        skip_existing_review=True, text_fn=self._safe_text,
-        validate_waren=False,
-        prepared_payload=apply_result["payload"],
-      )
-      self._shared_db = result["db"]
-      if result["issues"]:
-        return
-
-      if result["status"] != "saved":
-        return
-
-      # 4. Mail-Scraper-spezifisch: Warnung bei Bildfehler
-      post_save = result.get("post_save") or {}
-      image_result = post_save.get("image_result", {})
-      if image_result.get("reason") == "error":
-        QMessageBox.warning(
+      prepared_payload = dict(apply_result.get("payload") or {})
+      if not str(prepared_payload.get("bestellnummer", "") or "").strip():
+        QMessageBox.information(
           self,
-          "Bildpflege",
-          "Die Bestellung wurde gespeichert, aber die gemerkten Bildentscheidungen konnten noch nicht uebernommen werden."
+          "Bestellnummer fehlt",
+          "Bitte zuerst eine Bestellnummer pruefen oder die Mail ueberspringen/verwerfen."
         )
+        return
 
-      # 5. Finalisieren + weiter
+      self._staged_save_records[self.current_index] = {
+        "payload": prepared_payload,
+        "review_bundle": dict(apply_result.get("review_bundle") or {}) if isinstance(apply_result.get("review_bundle"), dict) else apply_result.get("review_bundle"),
+      }
+
+      # 3. Finalisieren + weiter
       self._finalize_current_mail("saved")
-      if result.get("renamed"):
-        self.summary["renamed"] += 1
       self._cleanup_and_advance()
     except Exception as e:
       log_exception(__name__, e)
@@ -3569,6 +4489,75 @@ class ScraperReviewWizardDialog(QDialog):
       if self._mail_status[idx] == "pending":
         return idx
     return -1
+
+  def _commit_staged_saves(self):
+    if self._commit_in_progress:
+      return False
+
+    staged_indices = [idx for idx, status in enumerate(self._mail_status) if status == "saved"]
+    if not staged_indices:
+      return True
+
+    previous_index = self.current_index
+    image_warning_needed = False
+    self._commit_in_progress = True
+    self._close_preview_dialogs()
+    QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+    try:
+      for idx in staged_indices:
+        staged_record = self._staged_save_records.get(idx)
+        if not isinstance(staged_record, dict):
+          raise RuntimeError(f"Mail {idx + 1} konnte nicht uebernommen werden, weil die Vormerkung fehlt.")
+
+        payload = dict(staged_record.get("payload") or {})
+        if not str(payload.get("bestellnummer", "") or "").strip():
+          raise RuntimeError(f"Mail {idx + 1} kann nicht uebernommen werden: Bestellnummer fehlt.")
+
+        self.current_index = idx
+        self._set_current_mail_data(dict(payload))
+        apply_result = self._apply_payload_to_current_mail(payload)
+        result = prepare_and_save_einkauf_workflow(
+          self,
+          self.settings_manager,
+          self.einkauf_form_widget,
+          self.einkauf_items_widget,
+          self.inputs,
+          payload_dict=apply_result["payload"],
+          db=self._shared_db,
+          review_bundle=staged_record.get("review_bundle"),
+          skip_existing_review=True,
+          text_fn=self._safe_text,
+          validate_waren=False,
+          prepared_payload=apply_result["payload"],
+        )
+        self._shared_db = result["db"]
+        if result.get("issues"):
+          raise RuntimeError(f"Mail {idx + 1} konnte nicht uebernommen werden: {'; '.join(result['issues'])}")
+        if result.get("status") != "saved":
+          raise RuntimeError(f"Mail {idx + 1} wurde nicht gespeichert.")
+        if result.get("renamed"):
+          self.summary["renamed"] += 1
+        post_save = result.get("post_save") or {}
+        image_result = post_save.get("image_result", {})
+        if image_result.get("reason") == "error":
+          image_warning_needed = True
+    except Exception as e:
+      log_exception(__name__, e)
+      if 0 <= previous_index < len(self.data_list):
+        self._activate_mail(previous_index)
+      QMessageBox.critical(self, "Uebernahme fehlgeschlagen", f"Fehler beim finalen Uebernehmen:\n{e}")
+      return False
+    finally:
+      self._commit_in_progress = False
+      QApplication.restoreOverrideCursor()
+
+    if image_warning_needed:
+      QMessageBox.warning(
+        self,
+        "Bildpflege",
+        "Mindestens eine Bestellung wurde gespeichert, aber gemerkte Bildentscheidungen konnten noch nicht komplett uebernommen werden."
+      )
+    return True
 
   def _cleanup_and_advance(self):
     """Raeumt aktuelle Mail auf und navigiert zur naechsten pending Mail."""
@@ -3693,7 +4682,7 @@ class ScraperReviewWizardDialog(QDialog):
     reply = QMessageBox.question(
       self,
       "Wizard beenden",
-      "Wizard jetzt beenden? Bereits gespeicherte Eintraege bleiben erhalten.",
+      "Wizard jetzt beenden?\nBereits vorgemerkte Mails werden komplett verworfen und nicht uebernommen.",
       QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
       QMessageBox.StandardButton.No,
     )
@@ -3704,6 +4693,8 @@ class ScraperReviewWizardDialog(QDialog):
     return dict(self.summary)
 
   def accept(self):
+    if not self._commit_staged_saves():
+      return
     self._teardown_dialog()
     super().accept()
 

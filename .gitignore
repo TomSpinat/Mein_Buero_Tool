@@ -22,6 +22,7 @@ data/debug_logs/
 data/media/products/
 data/media/shops/
 data/media/screenshots/
+backups/auto_backups/
 
 # Claude Code Memory (lokale Notizen)
 .claude/

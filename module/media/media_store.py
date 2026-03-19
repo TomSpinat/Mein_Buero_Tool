@@ -9,12 +9,17 @@ import shutil
 from pathlib import Path
 
 from PyQt6.QtGui import QImage
+from storage_paths import storage_root_dir
 
 
 class LocalMediaStore:
+    MAX_FILENAME_STEM_LEN = 48
+    MAX_FILENAME_TOTAL_LEN = 96
+
     def __init__(self, base_dir=None):
-        root_dir = base_dir or os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-        self.base_dir = os.path.abspath(root_dir)
+        root_dir = base_dir or storage_root_dir()
+        self.base_dir = os.path.abspath(os.fspath(root_dir))
+        self.project_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
         self.media_root = os.path.join(self.base_dir, "data", "media")
 
     def ensure_structure(self):
@@ -30,7 +35,7 @@ class LocalMediaStore:
         os.makedirs(abs_path, exist_ok=True)
         return abs_path
 
-    def sanitize_filename(self, name, fallback="asset"):
+    def sanitize_filename(self, name, fallback="asset", max_length=None):
         stem = Path(str(name or "")).stem.strip()
         if not stem:
             stem = fallback
@@ -45,6 +50,9 @@ class LocalMediaStore:
         cleaned = "".join(safe).strip("-_")
         while "--" in cleaned:
             cleaned = cleaned.replace("--", "-")
+        limit = self.MAX_FILENAME_STEM_LEN if max_length is None else int(max_length)
+        if limit > 0 and len(cleaned) > limit:
+            cleaned = cleaned[:limit].rstrip("-_")
         return cleaned or fallback
 
     def compute_sha256(self, file_path):
@@ -94,14 +102,37 @@ class LocalMediaStore:
             return ""
         if os.path.isabs(text):
             return text
-        return os.path.abspath(os.path.join(self.base_dir, text))
+        candidates = [
+            os.path.abspath(os.path.join(self.base_dir, text)),
+            os.path.abspath(os.path.join(self.project_dir, text)),
+        ]
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                return candidate
+        return candidates[0]
 
-    def build_managed_filename(self, source_name, sha256, extension="", fallback="asset"):
-        safe_name = self.sanitize_filename(source_name, fallback=fallback)
+    def _limit_filename_length(self, filename, extension=""):
         ext = str(extension or "").strip().lower()
         if ext and not ext.startswith("."):
             ext = f".{ext}"
-        return f"{sha256[:12]}_{safe_name}{ext}"
+        filename = str(filename or "").strip()
+        max_total = self.MAX_FILENAME_TOTAL_LEN
+        if len(filename) + len(ext) <= max_total:
+            return f"{filename}{ext}"
+
+        overflow = len(filename) + len(ext) - max_total
+        shortened = filename[: max(16, len(filename) - overflow)].rstrip("-_.")
+        return f"{shortened}{ext}"
+
+    def build_managed_filename(self, source_name, sha256, extension="", fallback="asset", token=""):
+        safe_name = self.sanitize_filename(source_name, fallback=fallback, max_length=self.MAX_FILENAME_STEM_LEN)
+        ext = str(extension or "").strip().lower()
+        if ext and not ext.startswith("."):
+            ext = f".{ext}"
+        source_token = str(sha256 or token or fallback or "asset").strip()
+        prefix = source_token[:12] or "asset"
+        candidate = f"{prefix}_{safe_name}"
+        return self._limit_filename_length(candidate, ext)
 
     def ingest_file(self, source_path, bucket, preferred_name=""):
         self.ensure_structure()
@@ -124,14 +155,14 @@ class LocalMediaStore:
     def build_generated_path(self, bucket, preferred_name="", extension=".png", token="generated"):
         self.ensure_structure()
         target_dir = self.bucket_path(bucket)
-        safe_name = self.sanitize_filename(preferred_name or token, fallback=token)
+        safe_name = self.sanitize_filename(preferred_name or token, fallback=token, max_length=40)
         ext = str(extension or ".png").strip().lower()
         if not ext.startswith("."):
             ext = f".{ext}"
-        candidate = os.path.join(target_dir, f"{safe_name}{ext}")
+        candidate = os.path.join(target_dir, self._limit_filename_length(safe_name, ext))
         counter = 1
         while os.path.exists(candidate):
-            candidate = os.path.join(target_dir, f"{safe_name}_{counter}{ext}")
+            candidate = os.path.join(target_dir, self._limit_filename_length(f"{safe_name}_{counter}", ext))
             counter += 1
         return {
             "absolute_path": candidate,

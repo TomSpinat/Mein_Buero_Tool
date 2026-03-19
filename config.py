@@ -9,8 +9,16 @@ import os
 import sys
 import uuid
 
+from module.ai.provider_settings import (
+    build_default_ai_profile_name_map,
+    build_default_ai_profile_override_map,
+    normalize_ai_profile_settings,
+    resolve_ai_profile_overrides,
+    normalize_ai_provider_name,
+)
 from module.crash_logger import log_exception
 from module.secret_store import SecretManager
+from storage_paths import default_external_storage_dir
 
 
 def resource_path(relative_path):
@@ -34,6 +42,8 @@ class SettingsManager:
 
     SECRET_KEYS = {
         "gemini_api_key": "Gemini API Key",
+        "openai_api_key": "OpenAI API Key",
+        "claude_api_key": "Claude API Key",
         "db_pass": "MySQL Passwort",
         "email_password": "E-Mail Passwort",
         "imap_pass": "IMAP Passwort",
@@ -57,7 +67,12 @@ class SettingsManager:
 
     def _default_settings(self):
         return {
+            "ai_provider": "gemini",
+            "ai_profile_name_by_provider": build_default_ai_profile_name_map(),
+            "ai_profile_overrides_by_provider": build_default_ai_profile_override_map(),
             "gemini_api_key": "",
+            "openai_api_key": "",
+            "claude_api_key": "",
             "db_host": "127.0.0.1",
             "db_port": "3306",
             "db_user": "root",
@@ -90,6 +105,7 @@ class SettingsManager:
             "shop_logo_search_google_cx": "",
             "shop_logo_search_timeout_sec": 8,
             "shop_logo_search_max_results": 6,
+            "external_storage_dir": str(default_external_storage_dir()),
             "trusted_mail_senders": [],
             "trusted_mail_domains": [],
             "test_wipe_on_start": False,
@@ -239,6 +255,13 @@ class SettingsManager:
     def _build_runtime_settings(self, persisted_settings):
         runtime = self._default_settings()
         runtime.update(copy.deepcopy(persisted_settings if isinstance(persisted_settings, dict) else {}))
+        runtime.update(
+            normalize_ai_profile_settings(
+                runtime.get("ai_provider", "gemini"),
+                runtime.get("ai_profile_name_by_provider", {}),
+                runtime.get("ai_profile_overrides_by_provider", {}),
+            )
+        )
 
         for key in self.SECRET_KEYS:
             runtime[key] = self._read_secret_value(key, runtime.get(key, ""))
@@ -279,6 +302,13 @@ class SettingsManager:
     def load_settings(self):
         persisted_settings = self._default_settings()
         persisted_settings.update(self._read_plain_settings_file())
+        persisted_settings.update(
+            normalize_ai_profile_settings(
+                persisted_settings.get("ai_provider", "gemini"),
+                persisted_settings.get("ai_profile_name_by_provider", {}),
+                persisted_settings.get("ai_profile_overrides_by_provider", {}),
+            )
+        )
 
         changed = self._migrate_plaintext_secrets(persisted_settings)
         sanitized_persisted = self._sanitize_plain_settings(persisted_settings)
@@ -296,6 +326,17 @@ class SettingsManager:
         plain_settings = self._default_settings()
         plain_settings.update(self._read_plain_settings_file())
         updates = copy.deepcopy(settings_dict if isinstance(settings_dict, dict) else {})
+        if any(key in updates for key in ("ai_provider", "ai_profile_name_by_provider", "ai_profile_overrides_by_provider")):
+            ai_provider_value = updates.get("ai_provider", plain_settings.get("ai_provider", "gemini"))
+            ai_profile_name_map = updates.get("ai_profile_name_by_provider", plain_settings.get("ai_profile_name_by_provider", {}))
+            ai_profile_override_map = updates.get("ai_profile_overrides_by_provider", plain_settings.get("ai_profile_overrides_by_provider", {}))
+            updates.update(
+                normalize_ai_profile_settings(
+                    ai_provider_value,
+                    ai_profile_name_map,
+                    ai_profile_override_map,
+                )
+            )
 
         for key, label in self.SECRET_KEYS.items():
             if key in updates:
@@ -317,6 +358,45 @@ class SettingsManager:
         if isinstance(value, (dict, list)):
             return copy.deepcopy(value)
         return value
+
+    def get_active_ai_provider(self):
+        return normalize_ai_provider_name(self.get("ai_provider", "gemini"))
+
+    def get_ai_api_key(self, provider_name=""):
+        resolved_provider = normalize_ai_provider_name(provider_name or self.get_active_ai_provider())
+        secret_key = f"{resolved_provider}_api_key" if resolved_provider != "gemini" else "gemini_api_key"
+        return str(self.get(secret_key, "") or "")
+
+    def get_active_ai_api_key(self):
+        return self.get_ai_api_key(self.get_active_ai_provider())
+
+    def get_ai_profile_name(self, provider_name=""):
+        resolved_provider = normalize_ai_provider_name(provider_name or self.get_active_ai_provider())
+        raw_map = self.get("ai_profile_name_by_provider", {})
+        profile_map = raw_map if isinstance(raw_map, dict) else {}
+        normalized = normalize_ai_profile_settings(
+            resolved_provider,
+            profile_map,
+            self.get("ai_profile_overrides_by_provider", {}),
+        )
+        return str(normalized["ai_profile_name_by_provider"].get(resolved_provider, "") or "")
+
+    def get_ai_profile_overrides(self, provider_name=""):
+        resolved_provider = normalize_ai_provider_name(provider_name or self.get_active_ai_provider())
+        raw_map = self.get("ai_profile_overrides_by_provider", {})
+        override_map = raw_map if isinstance(raw_map, dict) else {}
+        normalized = normalize_ai_profile_settings(
+            resolved_provider,
+            self.get("ai_profile_name_by_provider", {}),
+            override_map,
+        )
+        raw_entry = normalized["ai_profile_overrides_by_provider"].get(resolved_provider, {})
+        resolved_overrides = resolve_ai_profile_overrides(
+            resolved_provider,
+            self.get_ai_profile_name(resolved_provider),
+            raw_entry if isinstance(raw_entry, dict) else {},
+        )
+        return copy.deepcopy(resolved_overrides if isinstance(resolved_overrides, dict) else {})
 
     def has_secret(self, key):
         if key not in self.SECRET_KEYS:

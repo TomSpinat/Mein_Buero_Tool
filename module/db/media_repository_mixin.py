@@ -130,6 +130,60 @@ class MediaRepositoryMixin:
             logging.error(f"Fehler bei get_media_asset_by_key: {e}")
             return None
 
+    def list_local_media_assets(self):
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute(
+                """
+                SELECT *
+                FROM media_assets
+                WHERE storage_kind = 'local_file'
+                  AND file_path <> ''
+                ORDER BY id ASC
+                """
+            )
+            rows = cursor.fetchall() or []
+            cursor.close()
+            conn.close()
+            return rows
+        except Exception as e:
+            log_exception(__name__, e)
+            logging.error(f"Fehler bei list_local_media_assets: {e}")
+            return []
+
+    def update_media_asset_file_path(self, asset_id, file_path, original_name=None):
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor(dictionary=True)
+            if original_name is None:
+                cursor.execute(
+                    """
+                    UPDATE media_assets
+                    SET file_path = %s
+                    WHERE id = %s
+                    """,
+                    (str(file_path or "").strip(), int(asset_id)),
+                )
+            else:
+                cursor.execute(
+                    """
+                    UPDATE media_assets
+                    SET file_path = %s,
+                        original_name = %s
+                    WHERE id = %s
+                    """,
+                    (str(file_path or "").strip(), str(original_name or "").strip(), int(asset_id)),
+                )
+            conn.commit()
+            cursor.close()
+            conn.close()
+            return True
+        except Exception as e:
+            log_exception(__name__, e, extra={"asset_id": asset_id, "file_path": file_path})
+            logging.error(f"Fehler bei update_media_asset_file_path: {e}")
+            return False
+
     def upsert_media_asset(
         self,
         media_key,
@@ -951,7 +1005,6 @@ class MediaRepositoryMixin:
             log_exception(__name__, e, extra={"screenshot_asset_id": screenshot_asset_id})
             logging.error(f"Fehler bei create_screenshot_region: {e}")
             return None
-
 
 
 

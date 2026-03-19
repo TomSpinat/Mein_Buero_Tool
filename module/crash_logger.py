@@ -19,17 +19,21 @@ import sys
 import threading
 import traceback
 import urllib.error
-from dataclasses import dataclass
-from typing import Any, Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, Optional
 
 from module.secret_store import sanitize_text
+from storage_paths import storage_path
 
 
 _FAULTHANDLER_FILE = None
 _HOOKS_INSTALLED = False
+_MAX_LOG_RETENTION_DAYS = 14
+_MAX_DAILY_LOG_BYTES = 5 * 1024 * 1024
 
 _ERROR_PRIORITY = {
     "auth": 10,
+    "quota_exhausted": 12,
     "input_error": 15,
     "not_found": 20,
     "transport_not_available": 25,
@@ -55,6 +59,7 @@ class AppError(Exception):
     status_code: Optional[int] = None
     service: str = ""
     retryable: bool = False
+    meta: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         safe_user = sanitize_text(self.user_message or "").strip()
@@ -71,6 +76,7 @@ class AppError(Exception):
             "status_code": self.status_code,
             "service": str(self.service or ""),
             "retryable": bool(self.retryable),
+            "meta": dict(self.meta or {}),
         }
 
 
@@ -85,6 +91,7 @@ def error_to_payload(error: Any):
         "status_code": None,
         "service": "",
         "retryable": False,
+        "meta": {},
     }
 
 
@@ -104,7 +111,7 @@ def _project_root():
 
 
 def _log_dir():
-    path = os.path.join(_project_root(), "data", "crash_logs")
+    path = os.fspath(storage_path("data", "crash_logs"))
     os.makedirs(path, exist_ok=True)
     return path
 
@@ -132,8 +139,53 @@ def _format_extra(extra):
         return _safe_text(extra)
 
 
+def _cleanup_old_logs(prefix="crash"):
+    log_dir = _log_dir()
+    cutoff = datetime.datetime.now() - datetime.timedelta(days=_MAX_LOG_RETENTION_DAYS)
+    file_prefix = f"{prefix}_"
+
+    try:
+        file_names = os.listdir(log_dir)
+    except OSError:
+        return
+
+    for file_name in file_names:
+        if not file_name.startswith(file_prefix) or not file_name.endswith(".log"):
+            continue
+
+        file_path = os.path.join(log_dir, file_name)
+        try:
+            modified_at = datetime.datetime.fromtimestamp(os.path.getmtime(file_path))
+        except OSError:
+            continue
+
+        if modified_at >= cutoff:
+            continue
+
+        try:
+            os.remove(file_path)
+        except OSError:
+            pass
+
+
+def _rotate_large_log_file(path, prefix="crash"):
+    try:
+        if not os.path.exists(path):
+            return
+        if os.path.getsize(path) < _MAX_DAILY_LOG_BYTES:
+            return
+
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        archive_path = os.path.join(_log_dir(), f"{prefix}_{timestamp}.log")
+        os.replace(path, archive_path)
+    except OSError:
+        pass
+
+
 def _write_block(title, lines, prefix="crash"):
     path = _log_path(prefix=prefix)
+    _cleanup_old_logs(prefix=prefix)
+    _rotate_large_log_file(path, prefix=prefix)
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
     with open(path, "a", encoding="utf-8") as file_handle:
         file_handle.write("\n" + "=" * 88 + "\n")
@@ -261,6 +313,14 @@ def classify_gemini_error(exc: Exception, phase="request", status_code: Optional
     status = _extract_status_code(exc, fallback=status_code)
 
     error_kind = str(getattr(exc, "error_kind", "") or "").strip().lower()
+    quota_status = getattr(exc, "quota_status", None)
+    quota_payload = quota_status.to_dict() if hasattr(quota_status, "to_dict") else {}
+    meta = {
+        "provider_name": service,
+        "provider_phase": str(getattr(exc, "phase", "") or phase or "").strip(),
+        "provider_error_kind": error_kind,
+        "quota_status": quota_payload,
+    }
     if error_kind:
         technical = _safe_text(getattr(exc, "technical_message", "") or text)
         user_hint = _safe_text(getattr(exc, "user_message", "") or "")
@@ -280,6 +340,7 @@ def classify_gemini_error(exc: Exception, phase="request", status_code: Optional
                 technical_message=technical,
                 service=service,
                 retryable=True,
+                meta=meta,
             )
 
         if error_kind in ("incomplete_response", "missing_required_field"):
@@ -289,6 +350,7 @@ def classify_gemini_error(exc: Exception, phase="request", status_code: Optional
                 technical_message=technical,
                 service=service,
                 retryable=False,
+                meta=meta,
             )
 
         if error_kind == "schema_violation":
@@ -298,6 +360,7 @@ def classify_gemini_error(exc: Exception, phase="request", status_code: Optional
                 technical_message=technical,
                 service=service,
                 retryable=False,
+                meta=meta,
             )
 
         if error_kind in ("invalid_response", "invalid_json"):
@@ -307,6 +370,7 @@ def classify_gemini_error(exc: Exception, phase="request", status_code: Optional
                 technical_message=technical,
                 service=service,
                 retryable=False,
+                meta=meta,
             )
 
         if error_kind == "auth":
@@ -316,6 +380,17 @@ def classify_gemini_error(exc: Exception, phase="request", status_code: Optional
                 technical_message=technical,
                 service=service,
                 retryable=False,
+                meta=meta,
+            )
+
+        if error_kind == "quota_exhausted":
+            return AppError(
+                category="quota_exhausted",
+                user_message=user_hint or "Gemini Kontingent ist aktuell erschoepft.",
+                technical_message=technical,
+                service=service,
+                retryable=False,
+                meta=meta,
             )
 
         if error_kind == "input_error":
@@ -325,6 +400,7 @@ def classify_gemini_error(exc: Exception, phase="request", status_code: Optional
                 technical_message=technical,
                 service=service,
                 retryable=False,
+                meta=meta,
             )
 
         if error_kind == "transport_not_available":
@@ -334,6 +410,7 @@ def classify_gemini_error(exc: Exception, phase="request", status_code: Optional
                 technical_message=technical,
                 service=service,
                 retryable=False,
+                meta=meta,
             )
 
         if error_kind == "safety_blocked":
@@ -343,11 +420,12 @@ def classify_gemini_error(exc: Exception, phase="request", status_code: Optional
                 technical_message=technical,
                 service=service,
                 retryable=False,
+                meta=meta,
             )
 
     if status is not None:
         category, user_message, retryable = _http_error("Gemini", status)
-        return AppError(category=category, user_message=user_message, technical_message=text, status_code=status, service=service, retryable=retryable)
+        return AppError(category=category, user_message=user_message, technical_message=text, status_code=status, service=service, retryable=retryable, meta=meta)
 
     if isinstance(exc, json.JSONDecodeError) or phase == "json_parse":
         return AppError(
@@ -356,6 +434,17 @@ def classify_gemini_error(exc: Exception, phase="request", status_code: Optional
             technical_message=text,
             service=service,
             retryable=False,
+            meta=meta,
+        )
+
+    if _contains_any(low, ["daily", "per day", "day limit", "daily limit", "daily quota", "insufficient quota", "quota exhausted"]):
+        return AppError(
+            category="quota_exhausted",
+            user_message="Gemini Tages- oder Kontingentgrenze ist aktuell erreicht.",
+            technical_message=text,
+            service=service,
+            retryable=False,
+            meta=meta,
         )
 
     if _contains_any(low, ["quota", "rate limit", "resource exhausted", "too many requests"]):
@@ -365,6 +454,7 @@ def classify_gemini_error(exc: Exception, phase="request", status_code: Optional
             technical_message=text,
             service=service,
             retryable=True,
+            meta=meta,
         )
 
     if _contains_any(low, ["api key", "permission denied", "unauthorized", "forbidden", "authentication"]):
@@ -374,6 +464,7 @@ def classify_gemini_error(exc: Exception, phase="request", status_code: Optional
             technical_message=text,
             service=service,
             retryable=False,
+            meta=meta,
         )
 
     if _contains_any(low, ["not found", "resource not found", "model not found"]):
@@ -383,6 +474,7 @@ def classify_gemini_error(exc: Exception, phase="request", status_code: Optional
             technical_message=text,
             service=service,
             retryable=False,
+            meta=meta,
         )
 
     if isinstance(exc, (socket.timeout, TimeoutError)) or _contains_any(low, ["timeout", "timed out", "deadline exceeded"]):
@@ -392,6 +484,7 @@ def classify_gemini_error(exc: Exception, phase="request", status_code: Optional
             technical_message=text,
             service=service,
             retryable=True,
+            meta=meta,
         )
 
     if _contains_any(low, ["connection", "dns", "network", "unavailable", "reset by peer"]):
@@ -401,6 +494,7 @@ def classify_gemini_error(exc: Exception, phase="request", status_code: Optional
             technical_message=text,
             service=service,
             retryable=True,
+            meta=meta,
         )
 
     return AppError(
@@ -409,6 +503,7 @@ def classify_gemini_error(exc: Exception, phase="request", status_code: Optional
         technical_message=text,
         service=service,
         retryable=False,
+        meta=meta,
     )
 
 
@@ -457,6 +552,21 @@ def log_message(context, message, extra=None):
             lines.append("extra:")
             lines.append(_format_extra(extra))
         _write_block("INFO", lines, prefix="crash")
+    except Exception:
+        pass
+
+
+def log_mail_scan_trace(context, message, extra=None):
+    try:
+        lines = [
+            f"context: {context}",
+            f"thread: {threading.current_thread().name}",
+            f"message: {_safe_text(message)}",
+        ]
+        if extra is not None:
+            lines.append("extra:")
+            lines.append(_format_extra(extra))
+        _write_block("MAIL_SCAN_TRACE", lines, prefix="mailscan")
     except Exception:
         pass
 

@@ -15,7 +15,7 @@ import tempfile
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 
-from module.crash_logger import log_exception
+from module.crash_logger import log_exception, log_mail_scan_trace
 from module.database_manager import DatabaseManager
 from module.media.media_service import MediaService
 from module.safe_mail_renderer import SafeMailRenderer
@@ -25,6 +25,7 @@ class MailScreenshotRenderJob(QObject):
     progress_signal = pyqtSignal(object, object)
     finished_signal = pyqtSignal(object, object)
     error_signal = pyqtSignal(object, str)
+    LOAD_TIMEOUT_MS = 12000
 
     def __init__(self, session_id, raw_emails, settings_manager, parent=None):
         super().__init__(parent)
@@ -37,9 +38,13 @@ class MailScreenshotRenderJob(QObject):
         self._cancelled = False
         self._current_raw = None
         self._media = None
+        self._load_timer = QTimer(self)
+        self._load_timer.setSingleShot(True)
+        self._load_timer.timeout.connect(self._on_render_timeout)
 
     def start(self):
         try:
+            self._trace("render_job_started", {"mail_count": len(self.raw_emails)})
             self._ensure_view()
             self._render_next()
         except Exception as exc:
@@ -47,6 +52,7 @@ class MailScreenshotRenderJob(QObject):
 
     def cancel(self):
         self._cancelled = True
+        self._load_timer.stop()
         self._cleanup_tempfiles()
         self._cleanup_view()
 
@@ -58,6 +64,16 @@ class MailScreenshotRenderJob(QObject):
         self._view.setFixedSize(900, 2000)
         self._view.move(-2000, -2000)
         self._view.show()
+        self._trace("render_view_created")
+
+    def _trace(self, message, extra=None):
+        payload = dict(extra or {}) if isinstance(extra, dict) else {"detail": str(extra or "")}
+        payload.setdefault("session_id", int(self.session_id or 0))
+        payload.setdefault("mail_index", int(self._index + 1))
+        if isinstance(self._current_raw, dict):
+            payload.setdefault("mail_key", str(self._current_raw.get("_pipeline_card_key", "") or ""))
+            payload.setdefault("subject", str(self._current_raw.get("subject", "") or "")[:120])
+        log_mail_scan_trace("mail_screenshot_renderer.MailScreenshotRenderJob", message, extra=payload)
 
     def _media_service(self):
         if self._media is None:
@@ -107,6 +123,7 @@ class MailScreenshotRenderJob(QObject):
         self._current_raw = dict(self.raw_emails[self._index] or {})
         current_human = self._index + 1
         subject = str(self._current_raw.get("subject", ""))[:40]
+        self._trace("render_mail_started", {"current": current_human, "total": total})
         self.progress_signal.emit(
             self.session_id,
             {
@@ -134,6 +151,8 @@ class MailScreenshotRenderJob(QObject):
         except Exception:
             pass
         self._view.loadFinished.connect(self._on_load_finished)
+        self._load_timer.start(self.LOAD_TIMEOUT_MS)
+        self._trace("render_html_applied", {"timeout_ms": int(self.LOAD_TIMEOUT_MS)})
         SafeMailRenderer.apply_to_view(self._view, render_result)
 
     def _on_load_finished(self, _ok):
@@ -145,13 +164,42 @@ class MailScreenshotRenderJob(QObject):
         if self._cancelled:
             return
 
+        self._load_timer.stop()
+        self._trace("render_load_finished")
         QTimer.singleShot(350, self._capture_current)
+
+    def _on_render_timeout(self):
+        if self._cancelled or self._current_raw is None:
+            return
+        raw_email = dict(self._current_raw or {})
+        self._results.append((None, raw_email))
+        self._trace("render_timeout_fallback", {"timeout_ms": int(self.LOAD_TIMEOUT_MS)})
+        self.progress_signal.emit(
+            self.session_id,
+            {
+                "current": self._index + 1,
+                "total": len(self.raw_emails),
+                "log_message": " Screenshot-Laden dauerte zu lange, Text-Fallback wird verwendet.",
+                "raw_email": raw_email,
+                "mail_key": str(raw_email.get("_pipeline_card_key", "") or ""),
+                "screenshot_path": "",
+            },
+        )
+        self._index += 1
+        self._cleanup_view()
+        try:
+            self._ensure_view()
+        except Exception as exc:
+            self._handle_error(exc)
+            return
+        QTimer.singleShot(0, self._render_next)
 
     def _capture_current(self):
         if self._cancelled or self._view is None:
             return
 
         try:
+            self._load_timer.stop()
             tmp_file = tempfile.NamedTemporaryFile(suffix=".png", delete=False, prefix="mailshot_")
             tmp_path = tmp_file.name
             tmp_file.close()
@@ -179,6 +227,15 @@ class MailScreenshotRenderJob(QObject):
                     result_raw["_registered_screenshot_temp_file"] = True
 
                 self._results.append((final_path, result_raw))
+                self._trace(
+                    "render_capture_finished",
+                    {
+                        "screenshot_path": str(final_path or ""),
+                        "width": int(pixmap.width()),
+                        "height": int(pixmap.height()),
+                        "size_bytes": int(fsize or 0),
+                    },
+                )
                 self.progress_signal.emit(
                     self.session_id,
                     {
@@ -197,6 +254,7 @@ class MailScreenshotRenderJob(QObject):
                 except Exception:
                     pass
                 self._results.append((None, self._current_raw))
+                self._trace("render_capture_empty_fallback")
                 self.progress_signal.emit(
                     self.session_id,
                     {
@@ -215,7 +273,9 @@ class MailScreenshotRenderJob(QObject):
             self._handle_error(exc)
 
     def _handle_error(self, exc):
+        self._trace("render_job_error", {"error": str(exc or "")})
         log_exception(__name__, exc, extra={"session_id": self.session_id, "index": self._index})
+        self._load_timer.stop()
         self._cleanup_tempfiles()
         self._cleanup_view()
         if not self._cancelled:
@@ -235,8 +295,11 @@ class MailScreenshotRenderJob(QObject):
         if self._view is None:
             return
         try:
+            self._trace("render_view_cleanup_started")
+            SafeMailRenderer.release_view_resources(self._view)
             self._view.hide()
             self._view.deleteLater()
         except Exception as exc:
             log_exception(__name__, exc)
         self._view = None
+        self._trace("render_view_cleanup_finished")

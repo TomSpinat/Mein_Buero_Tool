@@ -35,6 +35,7 @@ from module.dashboard import DashboardWindow  # Wir bauen das Dashboard im näch
 from module.crash_logger import install_global_exception_hooks, log_exception
 from module.secret_store import sanitize_text
 from module.test_reset import maybe_wipe_on_start
+from storage_migrator import migrate_legacy_storage_to_external, migrate_existing_media_assets
 
 class FadeOverlay(QWidget):
     """
@@ -74,6 +75,7 @@ class IntroSplashScreen(QWidget):
     def __init__(self, settings_manager):
         super().__init__()
         self.settings_manager = settings_manager
+        self.setWindowIcon(QIcon(resource_path("assets/app_icon_avatar.png")))
         
         # 1. Entferne den typischen Windows-Rahmen (X, Maximieren, Minimieren)
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
@@ -178,7 +180,7 @@ def main():
         app = QApplication(sys.argv)
         
         # Das Window Icon für alle Fenster der App setzen
-        app.setWindowIcon(QIcon(resource_path("assets/app_icon.ico")))
+        app.setWindowIcon(QIcon(resource_path("assets/app_icon_avatar.png")))
         
         # Globale Stylesheets direkt auf die komplette Applikation anwenden
         from module.style_manager import StyleManager
@@ -189,11 +191,31 @@ def main():
         secret_warnings = settings.consume_secret_warnings()
         if secret_warnings:
             QMessageBox.warning(None, "Secret-Speicher", "\n\n".join(secret_warnings))
+        migration_result = migrate_legacy_storage_to_external()
+        moved_files = int(migration_result.get("moved_files", 0) or 0)
+        migration_errors = migration_result.get("errors", []) or []
+        if moved_files:
+            print(
+                f"[STORAGE] {moved_files} alte Dateien in die externe Ablage verschoben: "
+                f"{migration_result.get('target_root', '')}"
+            )
+        if migration_errors:
+            print(f"[STORAGE] {len(migration_errors)} Dateien konnten nicht verschoben werden.")
         db_manager = DatabaseManager(settings)
         
         try:
             db_manager.init_database()
             print("[INFO] MySQL Datenbank erfolgreich verbunden und Schema geladen.")
+            media_migration = migrate_existing_media_assets(settings)
+            renamed_files = int(media_migration.get("renamed_files", 0) or 0)
+            moved_media_files = int(media_migration.get("moved_files", 0) or 0)
+            if renamed_files or moved_media_files:
+                print(
+                    f"[STORAGE] Medien bereinigt: {moved_media_files} verschoben, "
+                    f"{renamed_files} Pfade aktualisiert."
+                )
+            if media_migration.get("errors"):
+                print(f"[STORAGE] {len(media_migration['errors'])} Medien konnten nicht bereinigt werden.")
             wipe_result = maybe_wipe_on_start(settings, db_manager=db_manager)
             if wipe_result.get("performed"):
                 tables_txt = ", ".join(wipe_result.get("wiped_tables", []))

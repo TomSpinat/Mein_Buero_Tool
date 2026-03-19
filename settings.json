@@ -1,4 +1,20 @@
 {
+    "ai_provider": "gemini",
+    "ai_profile_name_by_provider": {
+        "gemini": "gemini_paid_standard",
+        "openai": "openai_standard",
+        "claude": "claude_document_first"
+    },
+    "ai_profile_overrides_by_provider": {
+        "gemini": {
+            "base_profile_name": "gemini_paid_standard",
+            "ui_options": {
+                "retry_level": "high"
+            }
+        },
+        "openai": {},
+        "claude": {}
+    },
     "db_host": "127.0.0.1",
     "db_port": "3306",
     "db_user": "root",
@@ -35,6 +51,7 @@
     "shop_logo_search_google_cx": "95671900bc68049bd",
     "shop_logo_search_timeout_sec": 8,
     "shop_logo_search_max_results": 6,
+    "external_storage_dir": "C:/Users/timth/Desktop/Mein_Buero_Tool_Ablage",
     "trusted_mail_senders": [
         "confirmation-commande@amazon.fr",
         "noreply@news.paypal.com",

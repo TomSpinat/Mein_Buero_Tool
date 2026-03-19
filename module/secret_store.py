@@ -21,7 +21,7 @@ _ERROR_NOT_FOUND = 1168
 _SECRET_PATTERNS = [
     re.compile(r'(?i)(authorization\s*:\s*bearer\s+)([^\s,;]+)'),
     re.compile(r'(?i)((?:api[_ -]?key|token|secret|password|passwd|pwd)\s*[:=]\s*)([^\s,;]+)'),
-    re.compile(r'(?i)((?:"(?:gemini_api_key|upcitemdb_api_key|db_pass|email_password|imap_pass|pwd|password|token|secret)"\s*:\s*")([^"]*)("))'),
+    re.compile(r'(?i)((?:"(?:gemini_api_key|openai_api_key|claude_api_key|upcitemdb_api_key|db_pass|email_password|imap_pass|pwd|password|token|secret)"\s*:\s*")([^"]*)("))'),
 ]
 
 

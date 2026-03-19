@@ -26,6 +26,8 @@ from PyQt6.QtWebEngineCore import (
     QWebEngineUrlRequestInterceptor,
 )
 
+from module.crash_logger import log_mail_scan_trace
+
 
 TRUSTED_SENDERS_KEY = "trusted_mail_senders"
 TRUSTED_DOMAINS_KEY = "trusted_mail_domains"
@@ -120,6 +122,41 @@ class _MailPreviewPage(QWebEnginePage):
 
 
 class SafeMailRenderer:
+    @staticmethod
+    def release_view_resources(view):
+        if view is None:
+            return
+        old_page = getattr(view, "_mail_page", None)
+        old_profile = getattr(view, "_mail_profile", None)
+        old_interceptor = getattr(view, "_mail_interceptor", None)
+        try:
+            if old_page is not None:
+                try:
+                    old_page.deleteLater()
+                except Exception:
+                    pass
+            if old_interceptor is not None:
+                try:
+                    old_interceptor.deleteLater()
+                except Exception:
+                    pass
+            if old_profile is not None:
+                try:
+                    old_profile.setUrlRequestInterceptor(None)
+                except Exception:
+                    pass
+                try:
+                    old_profile.deleteLater()
+                except Exception:
+                    pass
+        finally:
+            for attr_name in ("_mail_page", "_mail_profile", "_mail_interceptor"):
+                try:
+                    setattr(view, attr_name, None)
+                except Exception:
+                    pass
+        log_mail_scan_trace("safe_mail_renderer.SafeMailRenderer", "release_view_resources", extra={"view_class": type(view).__name__})
+
     @staticmethod
     def extract_sender_identity(sender_text):
         display_name, email_addr = parseaddr(str(sender_text or ""))
@@ -290,6 +327,18 @@ class SafeMailRenderer:
 
     @classmethod
     def apply_to_view(cls, view, render_result):
+        cls.release_view_resources(view)
+        log_mail_scan_trace(
+            "safe_mail_renderer.SafeMailRenderer",
+            "apply_to_view",
+            extra={
+                "view_class": type(view).__name__,
+                "allow_remote": bool(render_result.allow_remote),
+                "blocked_remote_images": int(render_result.blocked_remote_images or 0),
+                "blocked_remote_links": int(render_result.blocked_remote_links or 0),
+                "blocked_active_content": int(render_result.blocked_active_content or 0),
+            },
+        )
         profile = QWebEngineProfile(view)
         interceptor = _MailRequestInterceptor(allow_remote=render_result.allow_remote, parent=profile)
         profile.setUrlRequestInterceptor(interceptor)

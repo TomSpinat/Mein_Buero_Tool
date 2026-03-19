@@ -38,7 +38,7 @@ class DashboardWindow(QMainWindow):
         self.settings_manager = settings_manager if settings_manager else SettingsManager()
 
         self.setWindowTitle("Just Business")
-        self.setWindowIcon(QIcon(resource_path("assets/icons/app_icon.png")))
+        self.setWindowIcon(QIcon(resource_path("assets/app_icon_avatar.png")))
 
         # Mindestgroesse setzen – darunter erscheinen Scrollbars in den Modulen
         self.setMinimumSize(960, 640)

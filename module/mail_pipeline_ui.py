@@ -50,6 +50,113 @@ def sender_domain(payload) -> str:
     return sender or "unbekannte-domain"
 
 
+def _payload_preplan(payload) -> dict:
+    payload = payload if isinstance(payload, dict) else {}
+    preplan = payload.get("_mail_scan_preplan")
+    if isinstance(preplan, dict):
+        return dict(preplan)
+    source_plan = payload.get("_scan_source_plan")
+    if isinstance(source_plan, dict):
+        return {
+            "input_category": str(source_plan.get("input_category", "") or ""),
+            "status_label": str(source_plan.get("status_label", "") or ""),
+            "status_text": str(source_plan.get("status_text", "") or ""),
+            "source_plan": dict(source_plan),
+        }
+    return {}
+
+
+def _payload_source_label(payload) -> str:
+    payload = payload if isinstance(payload, dict) else {}
+    preplan = _payload_preplan(payload)
+    source_plan = preplan.get("source_plan", {}) if isinstance(preplan.get("source_plan", {}), dict) else {}
+    category = _safe_text(preplan.get("input_category") or source_plan.get("input_category")).lower()
+    mapping = {
+        "mail_text_only": "Quelle: Text-only",
+        "pdf_primary": "Quelle: PDF direkt",
+        "mail_plus_pdf": "Quelle: Mail + PDF",
+        "mail_plus_screenshot": "Quelle: Mail + Screenshot",
+        "hybrid_full": "Quelle: Hybrid-Scan",
+    }
+    if category in mapping:
+        return mapping[category]
+    primary = source_plan.get("primary_visual_source", {}) if isinstance(source_plan.get("primary_visual_source", {}), dict) else {}
+    primary_type = _safe_text(primary.get("source_type", "")).lower()
+    if primary_type == "mail_attachment":
+        return "Quelle: Dokument"
+    if primary_type == "mail_render_screenshot":
+        return "Quelle: Screenshot"
+    if primary_type == "email_message":
+        return "Quelle: Mailtext"
+    return "Quelle: wird geplant"
+
+
+def _payload_profile_note(payload) -> str:
+    payload = payload if isinstance(payload, dict) else {}
+    runtime_note = _safe_text(payload.get("_ui_profile_note", ""))
+    if runtime_note:
+        return runtime_note
+    preplan = _payload_preplan(payload)
+    source_plan = preplan.get("source_plan", {}) if isinstance(preplan.get("source_plan", {}), dict) else {}
+    hints = source_plan.get("profile_status_hints", {}) if isinstance(source_plan.get("profile_status_hints", {}), dict) else {}
+    category = _safe_text(preplan.get("input_category") or source_plan.get("input_category")).lower()
+    if category in {"pdf_primary", "mail_plus_pdf", "hybrid_full"} and _safe_text(hints.get("pdf_preferred", "")):
+        return _safe_text(hints.get("pdf_preferred", ""))
+    if _safe_text(source_plan.get("upload_conservatism", "")).lower() in {"conservative", "document_first"}:
+        return _safe_text(hints.get("parallelism_reduced", "") or hints.get("text_fallback", ""))
+    return ""
+
+
+def _payload_detail_text(payload) -> str:
+    payload = payload if isinstance(payload, dict) else {}
+    error_text = _safe_text(payload.get("_ui_mail_error", ""))
+    if error_text:
+        return error_text
+    profile_note = _payload_profile_note(payload)
+    runtime_text = _safe_text(payload.get("_ui_runtime_status_text", ""))
+    generic_runtime_texts = {
+        "Neue Mail erkannt.",
+        "Mail wird fuer den Scan vorbereitet.",
+        "Mail ist vorbereitet.",
+        "Mail ist scanbereit.",
+        "Mail wartet auf den Provider-Scan.",
+        "Mail wird von der KI analysiert.",
+        "Mail-Scan abgeschlossen.",
+    }
+    if runtime_text and runtime_text not in generic_runtime_texts:
+        return runtime_text
+    if profile_note:
+        return profile_note
+    if runtime_text:
+        return runtime_text
+    preplan = _payload_preplan(payload)
+    if _safe_text(preplan.get("status_text", "")):
+        return _safe_text(preplan.get("status_text", ""))
+    return "Mail wird im aktuellen Scanlauf verarbeitet."
+
+
+def _payload_tooltip(payload) -> str:
+    payload = payload if isinstance(payload, dict) else {}
+    parts = []
+    subject = _safe_text(payload.get("subject") or payload.get("betreff"))
+    if subject:
+        parts.append(subject)
+    source_label = _payload_source_label(payload)
+    if source_label:
+        parts.append(source_label)
+    detail_text = _payload_detail_text(payload)
+    if detail_text:
+        parts.append(detail_text)
+    profile_note = _payload_profile_note(payload)
+    if profile_note and profile_note != detail_text:
+        parts.append(profile_note)
+    preplan = _payload_preplan(payload)
+    reasoning = _safe_text(preplan.get("decision_reason", ""))
+    if reasoning:
+        parts.append("Warum: " + reasoning)
+    return "\n".join(part for part in parts if part)
+
+
 def subject_preview(payload, limit=54) -> str:
     payload = payload if isinstance(payload, dict) else {}
     subject = _safe_text(payload.get("subject") or payload.get("betreff"))
@@ -310,9 +417,19 @@ class MailPipelineHeaderWidget(QFrame):
 class MailPreviewCardWidget(QFrame):
     STATUS_STYLES = {
         "scanned": {"border": "#3C4D73", "badge_bg": "#25334F", "badge_fg": "#9AA4C5", "label": "Erkannt"},
+        "pdf": {"border": "#60A5FA", "badge_bg": "#1E3A5F", "badge_fg": "#DBEAFE", "label": "PDF direkt"},
+        "textonly": {"border": "#94A3B8", "badge_bg": "#334155", "badge_fg": "#E2E8F0", "label": "Text-only"},
+        "hybrid": {"border": "#F59E0B", "badge_bg": "#452C12", "badge_fg": "#FDE68A", "label": "Hybrid"},
+        "queued": {"border": "#FBBF24", "badge_bg": "#3A2F12", "badge_fg": "#FDE68A", "label": "Wartet"},
+        "cooldown": {"border": "#F97316", "badge_bg": "#3C2412", "badge_fg": "#FED7AA", "label": "Wartet"},
+        "retry": {"border": "#FB7185", "badge_bg": "#3F1D28", "badge_fg": "#FFE4E6", "label": "Retry"},
+        "quota": {"border": "#EF4444", "badge_bg": "#411A20", "badge_fg": "#FECACA", "label": "Kontingent"},
+        "aborted": {"border": "#94A3B8", "badge_bg": "#334155", "badge_fg": "#E2E8F0", "label": "Abgebrochen"},
         "rendering": {"border": "#8B5CF6", "badge_bg": "#2D2250", "badge_fg": "#D3BCFF", "label": "Rendering"},
         "rendered": {"border": "#4FD1FF", "badge_bg": "#1D3340", "badge_fg": "#9BE7FF", "label": "Screenshot"},
+        "fallback": {"border": "#38BDF8", "badge_bg": "#173047", "badge_fg": "#BEE3F8", "label": "Text-Fallback"},
         "cloudscan": {"border": "#F7A34B", "badge_bg": "#3B2B19", "badge_fg": "#FFD19C", "label": "Cloudscan"},
+        "skipped": {"border": "#64748B", "badge_bg": "#273244", "badge_fg": "#CBD5E1", "label": "Kein Beleg"},
         "done": {"border": "#34D399", "badge_bg": "#193629", "badge_fg": "#A7F3D0", "label": "Fertig"},
         "error": {"border": "#F87171", "badge_bg": "#42202A", "badge_fg": "#FECACA", "label": "Fehler"},
     }
@@ -331,14 +448,14 @@ class MailPreviewCardWidget(QFrame):
     def _build_ui(self):
         self.setObjectName("mailPreviewCard")
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self.setFixedSize(236, 274)
+        self.setFixedSize(236, 320)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
 
         self.preview_label = QLabel(self)
-        self.preview_label.setFixedHeight(158)
+        self.preview_label.setFixedHeight(146)
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview_label.setStyleSheet("background-color: #131A2C; border-radius: 16px; border: 1px solid #2D3554;")
         layout.addWidget(self.preview_label)
@@ -362,6 +479,16 @@ class MailPreviewCardWidget(QFrame):
         meta_row.addWidget(self.lbl_domain, 1)
         layout.addLayout(meta_row)
 
+        self.lbl_source = QLabel("Quelle: wird geplant")
+        self.lbl_source.setWordWrap(True)
+        self.lbl_source.setStyleSheet("font-size: 11px; color: #D6DEFF;")
+        layout.addWidget(self.lbl_source)
+
+        self.lbl_detail = QLabel("Status folgt im Verlauf.")
+        self.lbl_detail.setWordWrap(True)
+        self.lbl_detail.setStyleSheet("font-size: 11px; color: #8CA0C8;")
+        layout.addWidget(self.lbl_detail)
+
     def animate_appearance(self):
         if self._card_effect is None:
             self._card_effect = QGraphicsOpacityEffect(self)
@@ -384,6 +511,12 @@ class MailPreviewCardWidget(QFrame):
         self.lbl_subject.setText(preview_text)
         self.lbl_subject.setToolTip(full_subject or preview_text)
         self.lbl_domain.setText(sender_domain(payload))
+        self.lbl_source.setText(_payload_source_label(payload))
+        self.lbl_detail.setText(_payload_detail_text(payload))
+        tooltip = _payload_tooltip(payload)
+        self.setToolTip(tooltip)
+        self.lbl_source.setToolTip(tooltip)
+        self.lbl_detail.setToolTip(tooltip)
         if self.preview_label.pixmap() is None:
             self.set_placeholder_preview(payload)
 
@@ -487,6 +620,7 @@ class MailPipelineDashboardWidget(QFrame):
         self._icon_paths = dict(icon_paths or {})
         self._cards = {}
         self._card_order = []
+        self._card_states = {}
         self._build_ui()
 
     def _build_ui(self):
@@ -500,16 +634,59 @@ class MailPipelineDashboardWidget(QFrame):
         )
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(16)
+        layout.setSpacing(12)
+
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(10)
 
         title = QLabel("Visuelle Scan-Pipeline")
         title.setStyleSheet("font-size: 18px; font-weight: bold; color: #E5E9F5;")
-        layout.addWidget(title)
+        title_row.addWidget(title, 1)
+
+        self.lbl_runtime_context = QLabel("Provider wird beim Start angezeigt.")
+        self.lbl_runtime_context.setStyleSheet(
+            "font-size: 11px; font-weight: bold; color: #DBEAFE; background-color: #1E3A5F; border: 1px solid #31527E; border-radius: 10px; padding: 5px 10px;"
+        )
+        self.lbl_runtime_context.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        title_row.addWidget(self.lbl_runtime_context, 0)
+        layout.addLayout(title_row)
 
         self.lbl_status = QLabel("Bereit fuer einen neuen Scan.")
         self.lbl_status.setWordWrap(True)
         self.lbl_status.setStyleSheet("font-size: 12px; color: #8CA0C8;")
         layout.addWidget(self.lbl_status)
+
+        self.lbl_runtime_hint = QLabel("Badge zeigt den Live-Status. Darunter steht die genutzte Quelle der Mail.")
+        self.lbl_runtime_hint.setWordWrap(True)
+        self.lbl_runtime_hint.setStyleSheet("font-size: 11px; color: #6E7EA4;")
+        layout.addWidget(self.lbl_runtime_hint)
+
+        self.summary_row = QHBoxLayout()
+        self.summary_row.setContentsMargins(0, 0, 0, 0)
+        self.summary_row.setSpacing(8)
+        self._summary_labels = {}
+        for key, title_text in (
+            ("found", "Gefunden"),
+            ("active", "Aktiv"),
+            ("waiting", "Wartend"),
+            ("finished", "Fertig"),
+            ("error", "Fehler"),
+        ):
+            label = QLabel(f"{title_text}: 0")
+            label.setStyleSheet(
+                "font-size: 11px; color: #D6DEFF; background-color: #17243D; border: 1px solid #2C3B5F; border-radius: 10px; padding: 4px 8px;"
+            )
+            self._summary_labels[key] = label
+            self.summary_row.addWidget(label, 0)
+        self.summary_row.addStretch(1)
+        layout.addLayout(self.summary_row)
+
+        self.lbl_monitoring = QLabel("")
+        self.lbl_monitoring.setWordWrap(True)
+        self.lbl_monitoring.setStyleSheet("font-size: 11px; color: #9FD8FF;")
+        self.lbl_monitoring.setVisible(False)
+        layout.addWidget(self.lbl_monitoring)
 
         self.header = MailPipelineHeaderWidget(self._icon_paths, self)
         layout.addWidget(self.header)
@@ -542,17 +719,35 @@ class MailPipelineDashboardWidget(QFrame):
     def reset(self, message="Bereit fuer einen neuen Scan."):
         self.header.reset()
         self.set_status_text(message)
+        self.set_monitoring_text("")
         for key in list(self._card_order):
             widget = self._cards.pop(key, None)
             if widget is not None:
                 widget.setParent(None)
                 widget.deleteLater()
         self._card_order = []
+        self._card_states = {}
         self.lbl_empty.setVisible(True)
+        self._update_summary_metrics()
         self._relayout_cards()
 
     def set_status_text(self, text: str):
         self.lbl_status.setText(_safe_text(text) or "Bereit fuer einen neuen Scan.")
+
+    def set_runtime_context(self, context_text: str, hint_text: str = "", tooltip_text: str = ""):
+        text = _safe_text(context_text) or "Provider wird beim Start angezeigt."
+        self.lbl_runtime_context.setText(text)
+        self.lbl_runtime_context.setToolTip(_safe_text(tooltip_text))
+        self.lbl_runtime_hint.setText(
+            _safe_text(hint_text) or "Badge zeigt den Live-Status. Darunter steht die genutzte Quelle der Mail."
+        )
+        self.lbl_runtime_hint.setToolTip(_safe_text(tooltip_text))
+
+    def set_monitoring_text(self, text: str, tooltip_text: str = ""):
+        cleaned = _safe_text(text)
+        self.lbl_monitoring.setVisible(bool(cleaned))
+        self.lbl_monitoring.setText(cleaned)
+        self.lbl_monitoring.setToolTip(_safe_text(tooltip_text))
 
     def set_stage(self, stage_key: str, progress: float = 0.0):
         self.header.set_stage(stage_key, progress)
@@ -571,7 +766,9 @@ class MailPipelineDashboardWidget(QFrame):
         card = self._cards[key]
         card.set_mail(payload)
         card.set_state(state_key)
+        self._card_states[key] = str(state_key or "scanned")
         self.lbl_empty.setVisible(False)
+        self._update_summary_metrics()
         self._relayout_cards()
         return card
 
@@ -582,6 +779,53 @@ class MailPipelineDashboardWidget(QFrame):
 
     def set_mail_state(self, payload, state_key: str):
         self.upsert_mail(payload, state_key=state_key)
+
+    def refresh_mail(self, payload):
+        key = mail_card_key(payload)
+        if key not in self._cards:
+            self.upsert_mail(payload, state_key="scanned")
+            return
+        card = self._cards[key]
+        card.set_mail(payload)
+        current_state = self._card_states.get(key, "scanned")
+        card.set_state(current_state)
+
+    def _update_summary_metrics(self):
+        found = len(self._card_order)
+        waiting_states = {"queued", "cooldown", "retry", "quota"}
+        finished_states = {"done", "skipped"}
+        error_states = {"error", "aborted"}
+        active_states = {"scanned", "pdf", "textonly", "hybrid", "fallback", "rendering", "rendered", "cloudscan"}
+        waiting = 0
+        finished = 0
+        errors = 0
+        active = 0
+        for state in self._card_states.values():
+            state_key = _safe_text(state).lower()
+            if state_key in waiting_states:
+                waiting += 1
+            elif state_key in finished_states:
+                finished += 1
+            elif state_key in error_states:
+                errors += 1
+            elif state_key in active_states:
+                active += 1
+        summary_values = {
+            "found": found,
+            "active": active,
+            "waiting": waiting,
+            "finished": finished,
+            "error": errors,
+        }
+        summary_titles = {
+            "found": "Gefunden",
+            "active": "Aktiv",
+            "waiting": "Wartend",
+            "finished": "Fertig",
+            "error": "Fehler",
+        }
+        for key, label in self._summary_labels.items():
+            label.setText(f"{summary_titles[key]}: {int(summary_values.get(key, 0) or 0)}")
 
     def _relayout_cards(self):
         while self.cards_layout.count():
