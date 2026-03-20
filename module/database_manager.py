@@ -11,6 +11,7 @@ from module.db.ean_repository_mixin import EanRepositoryMixin
 from module.db.media_repository_mixin import MediaRepositoryMixin
 from module.db.order_lookup_mixin import OrderLookupMixin
 from module.db.poms_repository_mixin import PomsRepositoryMixin
+from module.db.shipment_tracking_mixin import ShipmentTrackingMixin
 from module.db.todo_mixin import TodoMixin
 from module.db.ticket_matching_mixin import TicketMatchingMixin
 from module.db.order_processing_mixin import OrderProcessingMixin
@@ -22,6 +23,7 @@ class DatabaseManager(
     MediaRepositoryMixin,
     OrderLookupMixin,
     TicketMatchingMixin,
+    ShipmentTrackingMixin,
     OrderProcessingMixin,
     TodoMixin,
     SchemaManagementMixin,

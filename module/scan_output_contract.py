@@ -21,9 +21,14 @@ EINKAUF_FIELDS: Sequence[str] = (
     "shop_name",
     "bestell_email",
     "tracking_nummer_einkauf",
+    "tracking_url",
     "paketdienst",
     "lieferdatum",
     "sendungsstatus",
+    "amazon_marketplace_domain",
+    "amazon_order_id",
+    "amazon_ordering_shipment_id",
+    "amazon_package_id",
     "gesamt_ekp_brutto",
     "versandkosten_brutto",
     "nebenkosten_brutto",
@@ -295,9 +300,14 @@ class ValidatedEinkaufOutput:
     shop_name: str = ""
     bestell_email: str = ""
     tracking_nummer_einkauf: str = ""
+    tracking_url: str = ""
     paketdienst: str = ""
     lieferdatum: str = ""
     sendungsstatus: str = ""
+    amazon_marketplace_domain: str = ""
+    amazon_order_id: str = ""
+    amazon_ordering_shipment_id: str = ""
+    amazon_package_id: str = ""
     gesamt_ekp_brutto: str = ""
     versandkosten_brutto: str = ""
     nebenkosten_brutto: str = ""
@@ -316,9 +326,14 @@ class ValidatedEinkaufOutput:
             "shop_name": self.shop_name,
             "bestell_email": self.bestell_email,
             "tracking_nummer_einkauf": self.tracking_nummer_einkauf,
+            "tracking_url": self.tracking_url,
             "paketdienst": self.paketdienst,
             "lieferdatum": self.lieferdatum,
             "sendungsstatus": self.sendungsstatus,
+            "amazon_marketplace_domain": self.amazon_marketplace_domain,
+            "amazon_order_id": self.amazon_order_id,
+            "amazon_ordering_shipment_id": self.amazon_ordering_shipment_id,
+            "amazon_package_id": self.amazon_package_id,
             "gesamt_ekp_brutto": self.gesamt_ekp_brutto,
             "versandkosten_brutto": self.versandkosten_brutto,
             "nebenkosten_brutto": self.nebenkosten_brutto,
@@ -392,9 +407,14 @@ def get_scan_output_schema(scan_mode: str) -> Dict[str, Any]:
             "shop_name": {"type": "string"},
             "bestell_email": {"type": "string"},
             "tracking_nummer_einkauf": {"type": "string"},
+            "tracking_url": {"type": "string"},
             "paketdienst": {"type": "string"},
             "lieferdatum": {"type": "string"},
             "sendungsstatus": {"type": "string"},
+            "amazon_marketplace_domain": {"type": "string"},
+            "amazon_order_id": {"type": "string"},
+            "amazon_ordering_shipment_id": {"type": "string"},
+            "amazon_package_id": {"type": "string"},
             "gesamt_ekp_brutto": {"type": ["string", "number"]},
             "versandkosten_brutto": {"type": ["string", "number"]},
             "nebenkosten_brutto": {"type": ["string", "number"]},
@@ -491,9 +511,14 @@ def validate_and_normalize_output(scan_mode: str, payload: Any) -> ValidatedOutp
         shop_name=_to_text(source.get("shop_name", ""), "shop_name", mode),
         bestell_email=_to_text(source.get("bestell_email", ""), "bestell_email", mode),
         tracking_nummer_einkauf=_to_text(source.get("tracking_nummer_einkauf", ""), "tracking_nummer_einkauf", mode),
+        tracking_url=_to_text(source.get("tracking_url", ""), "tracking_url", mode),
         paketdienst=_to_text(source.get("paketdienst", ""), "paketdienst", mode),
         lieferdatum=_normalize_date(source.get("lieferdatum", ""), "lieferdatum", mode),
         sendungsstatus=_to_text(source.get("sendungsstatus", ""), "sendungsstatus", mode),
+        amazon_marketplace_domain=_to_text(source.get("amazon_marketplace_domain", ""), "amazon_marketplace_domain", mode),
+        amazon_order_id=_to_text(source.get("amazon_order_id", ""), "amazon_order_id", mode),
+        amazon_ordering_shipment_id=_to_text(source.get("amazon_ordering_shipment_id", ""), "amazon_ordering_shipment_id", mode),
+        amazon_package_id=_to_text(source.get("amazon_package_id", ""), "amazon_package_id", mode),
         gesamt_ekp_brutto=_normalize_money_text(source.get("gesamt_ekp_brutto", ""), "gesamt_ekp_brutto", mode),
         versandkosten_brutto=_normalize_money_text(source.get("versandkosten_brutto", ""), "versandkosten_brutto", mode),
         nebenkosten_brutto=_normalize_money_text(source.get("nebenkosten_brutto", ""), "nebenkosten_brutto", mode),

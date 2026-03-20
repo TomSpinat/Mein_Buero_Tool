@@ -964,13 +964,15 @@ class OrderDetailPage(QWidget):
         selected_date = date_edit.date().toPyDate()
 
         try:
+            self._db.set_inbound_shipment_status(
+                self.current_order_id,
+                ShipmentStatus.DELIVERED,
+                source="wareneingang_finish",
+                note="Wareneingang abgeschlossen",
+                extra_updates={"wareneingang_datum": selected_date},
+            )
             conn = self._db._get_connection()
             cursor = conn.cursor()
-            # Sendungsstatus + Eingangsdatum setzen
-            cursor.execute(
-                "UPDATE einkauf_bestellungen SET sendungsstatus = %s, wareneingang_datum = %s WHERE id = %s",
-                (shipment_db_value(ShipmentStatus.DELIVERED), selected_date, self.current_order_id),
-            )
             cursor.execute(
                 "UPDATE waren_positionen SET status = %s WHERE einkauf_id = %s",
                 (InventoryStatus.IN_STOCK.value, self.current_order_id),

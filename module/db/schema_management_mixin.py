@@ -53,8 +53,15 @@ class SchemaManagementMixin:
                     shop_name VARCHAR(255),
                     bestell_email VARCHAR(255),
                     tracking_nummer_einkauf VARCHAR(255),
+                    tracking_url VARCHAR(1000),
+                    tracking_url_source VARCHAR(100),
+                    tracking_url_kind VARCHAR(50),
                     paketdienst VARCHAR(255),
                     lieferdatum DATE,
+                    amazon_marketplace_domain VARCHAR(100),
+                    amazon_order_id VARCHAR(255),
+                    amazon_ordering_shipment_id VARCHAR(255),
+                    amazon_package_id VARCHAR(100),
                     sendungsstatus VARCHAR(50) DEFAULT '{default_shipment_status}',
                     gesamt_ekp_brutto DECIMAL(10,2),
                     warenwert_brutto DECIMAL(10,2) DEFAULT 0,
@@ -71,6 +78,34 @@ class SchemaManagementMixin:
 
             try:
                 cursor_db.execute("ALTER TABLE einkauf_bestellungen ADD COLUMN paketdienst VARCHAR(255)")
+            except Error:
+                pass
+            try:
+                cursor_db.execute("ALTER TABLE einkauf_bestellungen ADD COLUMN tracking_url VARCHAR(1000)")
+            except Error:
+                pass
+            try:
+                cursor_db.execute("ALTER TABLE einkauf_bestellungen ADD COLUMN tracking_url_source VARCHAR(100)")
+            except Error:
+                pass
+            try:
+                cursor_db.execute("ALTER TABLE einkauf_bestellungen ADD COLUMN tracking_url_kind VARCHAR(50)")
+            except Error:
+                pass
+            try:
+                cursor_db.execute("ALTER TABLE einkauf_bestellungen ADD COLUMN amazon_marketplace_domain VARCHAR(100)")
+            except Error:
+                pass
+            try:
+                cursor_db.execute("ALTER TABLE einkauf_bestellungen ADD COLUMN amazon_order_id VARCHAR(255)")
+            except Error:
+                pass
+            try:
+                cursor_db.execute("ALTER TABLE einkauf_bestellungen ADD COLUMN amazon_ordering_shipment_id VARCHAR(255)")
+            except Error:
+                pass
+            try:
+                cursor_db.execute("ALTER TABLE einkauf_bestellungen ADD COLUMN amazon_package_id VARCHAR(100)")
             except Error:
                 pass
 
@@ -201,7 +236,14 @@ class SchemaManagementMixin:
                     id INT AUTO_INCREMENT PRIMARY KEY,
                     tracking_nummer VARCHAR(255) UNIQUE NOT NULL,
                     versanddatum DATE,
+                    tracking_url VARCHAR(1000),
+                    tracking_url_source VARCHAR(100),
+                    tracking_url_kind VARCHAR(50),
                     paketdienst VARCHAR(255),
+                    amazon_marketplace_domain VARCHAR(100),
+                    amazon_order_id VARCHAR(255),
+                    amazon_ordering_shipment_id VARCHAR(255),
+                    amazon_package_id VARCHAR(100),
                     sendungsstatus VARCHAR(50) DEFAULT '{default_shipment_status}'
                 )
                 """
@@ -209,6 +251,34 @@ class SchemaManagementMixin:
 
             try:
                 cursor_db.execute("ALTER TABLE ausgangs_pakete ADD COLUMN paketdienst VARCHAR(255)")
+            except Error:
+                pass
+            try:
+                cursor_db.execute("ALTER TABLE ausgangs_pakete ADD COLUMN tracking_url VARCHAR(1000)")
+            except Error:
+                pass
+            try:
+                cursor_db.execute("ALTER TABLE ausgangs_pakete ADD COLUMN tracking_url_source VARCHAR(100)")
+            except Error:
+                pass
+            try:
+                cursor_db.execute("ALTER TABLE ausgangs_pakete ADD COLUMN tracking_url_kind VARCHAR(50)")
+            except Error:
+                pass
+            try:
+                cursor_db.execute("ALTER TABLE ausgangs_pakete ADD COLUMN amazon_marketplace_domain VARCHAR(100)")
+            except Error:
+                pass
+            try:
+                cursor_db.execute("ALTER TABLE ausgangs_pakete ADD COLUMN amazon_order_id VARCHAR(255)")
+            except Error:
+                pass
+            try:
+                cursor_db.execute("ALTER TABLE ausgangs_pakete ADD COLUMN amazon_ordering_shipment_id VARCHAR(255)")
+            except Error:
+                pass
+            try:
+                cursor_db.execute("ALTER TABLE ausgangs_pakete ADD COLUMN amazon_package_id VARCHAR(100)")
             except Error:
                 pass
 
@@ -533,6 +603,25 @@ class SchemaManagementMixin:
                 )
             )
 
+            cursor_db.execute(
+                textwrap.dedent(
+                    """
+                    CREATE TABLE IF NOT EXISTS shipment_status_history (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        direction VARCHAR(20) NOT NULL,
+                        shipment_id INT NOT NULL,
+                        old_status VARCHAR(50) DEFAULT NULL,
+                        new_status VARCHAR(50) NOT NULL,
+                        source VARCHAR(100) DEFAULT 'manual',
+                        note VARCHAR(255) DEFAULT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        INDEX idx_shipment_status_history_lookup (direction, shipment_id, created_at),
+                        INDEX idx_shipment_status_history_status (direction, new_status, created_at)
+                    )
+                    """
+                )
+            )
+
             conn_db.commit()
             cursor_db.close()
             conn_db.close()
@@ -558,6 +647,7 @@ class SchemaManagementMixin:
             "screenshot_regions",
             "product_image_links",
             "shop_logo_links",
+            "shipment_status_history",
             "media_assets",
             "waren_positionen",
             "produkt_bilder",

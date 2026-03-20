@@ -6,6 +6,7 @@ from module.crash_logger import log_exception
 from module.order_change_review import ChangeProposal, build_source_meta_from_payload, format_change_line, summarize_change_counts
 from module.status_model import ShipmentStatus, shipment_db_value
 from module.module1_trace_logger import write_module1_trace
+from module.tracking_link_utils import enrich_tracking_payload
 
 class OrderProcessingMixin:
     def _to_netto(self, brutto: float, ust_satz_pct: float) -> float:
@@ -376,6 +377,7 @@ class OrderProcessingMixin:
         2. Die zugehoerigen Artikel in `waren_positionen`
         3. Offene "ticket folgt" Verkaeufe werden direkt nachverknuepft
         """
+        data_dict = enrich_tracking_payload(data_dict)
         bestellnummer = str(data_dict.get("bestellnummer", "")).strip()
         if not bestellnummer:
             bestellnummer = f"AUTO_{int(time.time())}"
@@ -423,11 +425,25 @@ class OrderProcessingMixin:
         try:
             cursor = conn.cursor(dictionary=True)
 
+            cursor.execute(
+                """
+                SELECT id, sendungsstatus
+                FROM einkauf_bestellungen
+                WHERE bestellnummer = %s
+                LIMIT 1
+                """,
+                (bestellnummer,),
+            )
+            existing_order = cursor.fetchone() or {}
+            previous_status = existing_order.get("sendungsstatus")
+
             default_shipment_status = shipment_db_value(ShipmentStatus.NOT_DISPATCHED)
             sql_kopf = f"""
             INSERT INTO einkauf_bestellungen (
                 bestellnummer, kaufdatum, shop_name, bestell_email,
-                tracking_nummer_einkauf, paketdienst, lieferdatum, sendungsstatus,
+                tracking_nummer_einkauf, tracking_url, tracking_url_source, tracking_url_kind,
+                paketdienst, lieferdatum, amazon_marketplace_domain, amazon_order_id,
+                amazon_ordering_shipment_id, amazon_package_id, sendungsstatus,
                 gesamt_ekp_brutto, warenwert_brutto, versandkosten_brutto,
                 nebenkosten_brutto, rabatt_brutto, einstand_gesamt_brutto, ust_satz,
                 reverse_charge, storno_status, einstand_gesamt_netto,
@@ -435,15 +451,22 @@ class OrderProcessingMixin:
                 rechnung_vorhanden, rechnung_pdf_pfad
             ) VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             ON DUPLICATE KEY UPDATE
                 kaufdatum = IF(VALUES(kaufdatum) IS NOT NULL, VALUES(kaufdatum), kaufdatum),
                 shop_name = IF(VALUES(shop_name) != '', VALUES(shop_name), shop_name),
                 bestell_email = IF(VALUES(bestell_email) != '', VALUES(bestell_email), bestell_email),
                 tracking_nummer_einkauf = IF(VALUES(tracking_nummer_einkauf) != '', VALUES(tracking_nummer_einkauf), tracking_nummer_einkauf),
+                tracking_url = IF(VALUES(tracking_url) != '', VALUES(tracking_url), tracking_url),
+                tracking_url_source = IF(VALUES(tracking_url_source) != '', VALUES(tracking_url_source), tracking_url_source),
+                tracking_url_kind = IF(VALUES(tracking_url_kind) != '', VALUES(tracking_url_kind), tracking_url_kind),
                 paketdienst = IF(VALUES(paketdienst) != '', VALUES(paketdienst), paketdienst),
                 lieferdatum = IF(VALUES(lieferdatum) IS NOT NULL, VALUES(lieferdatum), lieferdatum),
+                amazon_marketplace_domain = IF(VALUES(amazon_marketplace_domain) != '', VALUES(amazon_marketplace_domain), amazon_marketplace_domain),
+                amazon_order_id = IF(VALUES(amazon_order_id) != '', VALUES(amazon_order_id), amazon_order_id),
+                amazon_ordering_shipment_id = IF(VALUES(amazon_ordering_shipment_id) != '', VALUES(amazon_ordering_shipment_id), amazon_ordering_shipment_id),
+                amazon_package_id = IF(VALUES(amazon_package_id) != '', VALUES(amazon_package_id), amazon_package_id),
                 sendungsstatus = IF(VALUES(sendungsstatus) != '{default_shipment_status}', VALUES(sendungsstatus), sendungsstatus),
                 gesamt_ekp_brutto = IF(VALUES(gesamt_ekp_brutto) > 0, VALUES(gesamt_ekp_brutto), gesamt_ekp_brutto),
                 warenwert_brutto = IF(VALUES(warenwert_brutto) > 0, VALUES(warenwert_brutto), warenwert_brutto),
@@ -476,8 +499,15 @@ class OrderProcessingMixin:
                 str(data_dict.get("shop_name", "")).strip(),
                 str(data_dict.get("bestell_email", "")).strip(),
                 str(data_dict.get("tracking_nummer_einkauf", "")).strip(),
+                str(data_dict.get("tracking_url", "")).strip() or None,
+                str(data_dict.get("tracking_url_source", "")).strip() or None,
+                str(data_dict.get("tracking_url_kind", "")).strip() or None,
                 str(data_dict.get("paketdienst", "")).strip(),
                 lieferdatum,
+                str(data_dict.get("amazon_marketplace_domain", "")).strip() or None,
+                str(data_dict.get("amazon_order_id", "")).strip() or None,
+                str(data_dict.get("amazon_ordering_shipment_id", "")).strip() or None,
+                str(data_dict.get("amazon_package_id", "")).strip() or None,
                 sendungsstatus,
                 self._round_money(gesamt_ekp_input),
                 self._round_money(kosten_meta.get("warenwert_brutto", 0.0)),
@@ -502,6 +532,22 @@ class OrderProcessingMixin:
             if not result:
                 raise Exception("Fehler beim Abrufen der Einkaufs-ID nach dem Speichern!")
             einkauf_id = result["id"]
+
+            cursor.execute(
+                "SELECT sendungsstatus FROM einkauf_bestellungen WHERE id = %s LIMIT 1",
+                (einkauf_id,),
+            )
+            final_order_row = cursor.fetchone() or {}
+            final_status = final_order_row.get("sendungsstatus")
+            self._write_shipment_status_history_cursor(
+                cursor,
+                direction="inbound",
+                shipment_id=einkauf_id,
+                old_status=previous_status,
+                new_status=final_status,
+                source="order_processing_upsert",
+                note="Status aus Bestellimport uebernommen",
+            )
 
             if unit_rows:
                 cursor.execute("""
@@ -667,6 +713,7 @@ class OrderProcessingMixin:
                 conn.close()
 
     def preview_order_enrichment(self, data_dict, max_lines=12):
+        data_dict = enrich_tracking_payload(data_dict)
         bestellnummer = str(data_dict.get("bestellnummer", "")).strip()
         source_meta = build_source_meta_from_payload(data_dict)
         empty = {
@@ -742,8 +789,15 @@ class OrderProcessingMixin:
                 "shop_name": str(data_dict.get("shop_name", "")).strip(),
                 "bestell_email": str(data_dict.get("bestell_email", "")).strip(),
                 "tracking_nummer_einkauf": str(data_dict.get("tracking_nummer_einkauf", "")).strip(),
+                "tracking_url": str(data_dict.get("tracking_url", "")).strip(),
+                "tracking_url_source": str(data_dict.get("tracking_url_source", "")).strip(),
+                "tracking_url_kind": str(data_dict.get("tracking_url_kind", "")).strip(),
                 "paketdienst": str(data_dict.get("paketdienst", "")).strip(),
                 "lieferdatum": str(data_dict.get("lieferdatum") or "")[:10],
+                "amazon_marketplace_domain": str(data_dict.get("amazon_marketplace_domain", "")).strip(),
+                "amazon_order_id": str(data_dict.get("amazon_order_id", "")).strip(),
+                "amazon_ordering_shipment_id": str(data_dict.get("amazon_ordering_shipment_id", "")).strip(),
+                "amazon_package_id": str(data_dict.get("amazon_package_id", "")).strip(),
                 "sendungsstatus": shipment_db_value(data_dict.get("sendungsstatus", "")),
                 "gesamt_ekp_brutto": self._round_money(gesamt),
                 "warenwert_brutto": self._round_money(kosten_meta.get("warenwert_brutto", 0.0)),
@@ -824,8 +878,15 @@ class OrderProcessingMixin:
                 "shop_name": ("Shop", _text_kind),
                 "bestell_email": ("Bestell-Email", _text_kind),
                 "tracking_nummer_einkauf": ("Tracking", _text_kind),
+                "tracking_url": ("Tracking-Link", _text_kind),
+                "tracking_url_source": ("Tracking-Link Quelle", _text_kind),
+                "tracking_url_kind": ("Tracking-Link Typ", _text_kind),
                 "paketdienst": ("Paketdienst", _text_kind),
                 "lieferdatum": ("Lieferdatum", _date_kind),
+                "amazon_marketplace_domain": ("Amazon Domain", _text_kind),
+                "amazon_order_id": ("Amazon Bestell-ID", _text_kind),
+                "amazon_ordering_shipment_id": ("Amazon Versand-ID", _text_kind),
+                "amazon_package_id": ("Amazon Paket-ID", _text_kind),
                 "sendungsstatus": ("Sendungsstatus", _ship_kind),
                 "gesamt_ekp_brutto": ("Gesamtpreis", _num_kind),
                 "warenwert_brutto": ("Warenwert", _num_kind),
