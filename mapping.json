@@ -10,6 +10,8 @@
         "Ueberweisung (DE12 5001)": "Ueberweisung (DE12 5001)",
         "Mastercard": "Mastercard",
         "Kreditkarte": "Kreditkarte",
-        "direct debit": "direct debit"
+        "direct debit": "direct debit",
+        "Revolut Mastercard": "Revolut Mastercard",
+        "SEPA Bank account": "SEPA Bank account"
     }
 }

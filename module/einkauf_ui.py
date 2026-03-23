@@ -27,6 +27,11 @@ from PyQt6.QtWidgets import (
 
 from module.ui_media_pixmap import create_placeholder_pixmap, render_preview_pixmap
 from module.module1_trace_logger import write_module1_trace
+from module.money_tooltips import (
+    build_purchase_amount_field_labels,
+    calculate_purchase_payload_breakdown,
+    infer_purchase_ust_satz,
+)
 
 from module.order_change_review import (
     change_kind_label,
@@ -232,7 +237,7 @@ def collect_einkauf_extra_fields(payload):
             continue
         if value in ("", None, [], {}):
             continue
-        rows.append((str(key), _format_extra_value(value)))
+        rows.append((str(key), str(key), _format_extra_value(value)))
 
     waren = payload.get("waren", [])
     if isinstance(waren, list):
@@ -244,9 +249,9 @@ def collect_einkauf_extra_fields(payload):
                     continue
                 if value in ("", None, [], {}):
                     continue
-                rows.append((f"Artikel {row_index} - {key}", _format_extra_value(value)))
+                rows.append((f"item_{row_index}_{key}", f"Artikel {row_index} - {key}", _format_extra_value(value)))
 
-    rows.sort(key=lambda pair: pair[0].lower())
+    rows.sort(key=lambda pair: pair[1].lower())
     return rows
 
 
@@ -632,7 +637,7 @@ class SummenBannerWidget(QFrame):
         layout.addStretch()
         self.setVisible(False)
 
-    def update_from_items(self, items, gesamt_ekp_brutto=None):
+    def update_from_items(self, items, gesamt_ekp_brutto=None, payload=None, settings=None):
         """Berechnet Warenwert aus Artikelliste und vergleicht mit KI-Gesamtpreis.
 
         items: list of dicts with 'menge' and 'ekp_brutto' keys
@@ -640,18 +645,20 @@ class SummenBannerWidget(QFrame):
         """
         if not items:
             self.setVisible(False)
+            self.lbl_berechnet.setToolTip("")
+            self.lbl_warnung.setToolTip("")
             return
 
-        warenwert = 0.0
-        for item in items:
-            try:
-                menge = float(str(item.get("menge", 1) or 1).replace(",", "."))
-                preis = float(str(item.get("ekp_brutto", 0) or 0).replace(",", "."))
-                warenwert += menge * preis
-            except (ValueError, TypeError):
-                pass
+        payload_data = dict(payload or {}) if isinstance(payload, dict) else {}
+        payload_data["waren"] = list(items or [])
+        if payload_data.get("gesamt_ekp_brutto") in (None, ""):
+            payload_data["gesamt_ekp_brutto"] = gesamt_ekp_brutto
+        money_meta = calculate_purchase_payload_breakdown(payload_data, settings=settings)
+        warenwert = float(money_meta.get("warenwert_brutto", 0.0) or 0.0)
+        summary_tooltips = money_meta.get("_money_tooltips", {}) or {}
 
         self.lbl_berechnet.setText(f"Berechnet: {warenwert:.2f} EUR")
+        self.lbl_berechnet.setToolTip(str(summary_tooltips.get("warenwert_brutto", "") or ""))
 
         ki_gesamt = 0.0
         try:
@@ -666,11 +673,14 @@ class SummenBannerWidget(QFrame):
             if delta > 0.02:
                 self.lbl_warnung.setText(f"Abweichung: {delta:.2f} EUR")
                 self.lbl_warnung.setVisible(True)
+                self.lbl_warnung.setToolTip(str(summary_tooltips.get("delta_to_header_total", "") or ""))
             else:
                 self.lbl_warnung.setVisible(False)
+                self.lbl_warnung.setToolTip("")
         else:
             self.lbl_ki.setVisible(False)
             self.lbl_warnung.setVisible(False)
+            self.lbl_warnung.setToolTip("")
 
         self.setVisible(True)
 
@@ -679,6 +689,7 @@ class InlineChangeFieldRow(QWidget):
     # Proxy signal so FieldLookupBinding can connect to returnPressed
     # exactly like it would on a plain QLineEdit.
     returnPressed = pyqtSignal()
+    valueChanged = pyqtSignal(str, str)
 
     def __init__(self, field_key, label_text, parent=None):
         super().__init__(parent)
@@ -695,6 +706,10 @@ class InlineChangeFieldRow(QWidget):
     def setPlaceholderText(self, text: str):
         """Proxy so callers can treat this like a QLineEdit."""
         self.normal_input.setPlaceholderText(text)
+
+    def set_label_text(self, text: str):
+        self.label_text = str(text or self.field_key or "Wert")
+        self.lbl_name.setText(self.label_text + ":")
 
     def _build_ui(self):
         layout = QHBoxLayout(self)
@@ -714,6 +729,7 @@ class InlineChangeFieldRow(QWidget):
         self.normal_input = QLineEdit()
         # Forward returnPressed so FieldLookupBinding works transparently
         self.normal_input.returnPressed.connect(self.returnPressed)
+        self.normal_input.textEdited.connect(self._on_normal_text_edited)
         self.value_host.addWidget(self.normal_input)
 
         self.compare_widget = QWidget(self)
@@ -784,6 +800,12 @@ class InlineChangeFieldRow(QWidget):
         self.normal_input.setText(str(text or "").strip())
         self._apply_normal_style(change_kind)
 
+    def _emit_value_changed(self):
+        self.valueChanged.emit(self.field_key, str(self.text() or "").strip())
+
+    def _on_normal_text_edited(self, text):
+        self.valueChanged.emit(self.field_key, str(text or "").strip())
+
     def _kind_palette(self):
         if self._change_kind == "mapped":
             return {
@@ -848,15 +870,18 @@ class InlineChangeFieldRow(QWidget):
     def _select_old(self):
         self._selected_side = "old"
         self._apply_compare_styles()
+        self._emit_value_changed()
 
     def _select_new(self):
         self._selected_side = "new"
         self._apply_compare_styles()
+        self._emit_value_changed()
 
     def _commit_new_value(self, text):
         self._new_value = str(text or "").strip()
         self._selected_side = "new"
         self._apply_compare_styles()
+        self._emit_value_changed()
 
     def setText(self, value):
         text = str(value or "").strip()
@@ -888,6 +913,8 @@ class InlineChangeFieldRow(QWidget):
         self._old_value = "" if old_value is None else str(old_value)
         self._new_value = "" if new_value is None else str(new_value)
         self._selected_side = "new"
+        old_display = str(format_review_value(self._old_value) or "").strip()
+        new_display = str(format_review_value(self._new_value) or "").strip()
 
         if self._change_kind == "add":
             fill_text = str(self.normal_input.text() or "").strip()
@@ -903,10 +930,15 @@ class InlineChangeFieldRow(QWidget):
             self.clear_review_change(keep_text)
             return
 
+        if old_display == new_display:
+            keep_text = str(self.normal_input.text() or "").strip() or new_display
+            self.clear_review_change(keep_text)
+            return
+
         self._display_mode = "compare"
         self.normal_input.setVisible(False)
         self.compare_widget.setVisible(True)
-        self.btn_old.setText(format_review_value(self._old_value))
+        self.btn_old.setText(old_display)
         self.edit_new.set_committed_text(str(self.normal_input.text() or "").strip() or format_review_value(self._new_value))
         self._apply_compare_styles()
 
@@ -995,6 +1027,7 @@ class InlineChangeFieldRow(QWidget):
         """Wendet einen Suggestion-Wert an und entfernt den Dropdown."""
         self.normal_input.setText(str(value or ""))
         self._clear_suggestion_ui()
+        self._emit_value_changed()
         # returnPressed emittieren damit FieldLookupBinding den Lookup auslöst (z.B. Logo-Suche)
         self.normal_input.returnPressed.emit()
 
@@ -1025,6 +1058,7 @@ class InlineChangeFieldRow(QWidget):
 
 class EinkaufHeadFormWidget(QWidget):
     logoSearchRequested = pyqtSignal(object)
+    valueChanged = pyqtSignal(str, str)
 
     def __init__(self, parent=None, logo_search_mode="context"):
         super().__init__(parent)
@@ -1034,11 +1068,43 @@ class EinkaufHeadFormWidget(QWidget):
         self.inputs = {}
         self.field_rows = {}
         self._extra_rows = []
-        self._media_preview = _UiMediaPreviewResolver(getattr(parent, "settings_manager", None))
+        self._settings_manager = getattr(parent, "settings_manager", None)
+        self._media_preview = _UiMediaPreviewResolver(self._settings_manager)
         self._payload_context = {}
         self._review_bundle = {}
         self._draft_image_states = {}
         self._build_ui()
+
+    def _current_steuer_modus(self):
+        if self._settings_manager:
+            return self._settings_manager.get("steuer_modus", "kleinunternehmer")
+        return "kleinunternehmer"
+
+    def _current_default_ust_satz(self):
+        if self._settings_manager:
+            return self._settings_manager.get("default_ust_satz", 19.0)
+        return 19.0
+
+    def _sync_tax_display_state(self, payload):
+        payload = dict(payload or {}) if isinstance(payload, dict) else {}
+        effective_ust = infer_purchase_ust_satz(
+            payload,
+            default_ust_satz=self._current_default_ust_satz(),
+            steuer_modus=self._current_steuer_modus(),
+        )
+        payload["ust_satz"] = f"{float(effective_ust):.2f}".rstrip("0").rstrip(".")
+
+        amount_labels = build_purchase_amount_field_labels(
+            payload,
+            settings=self._settings_manager,
+            steuer_modus=self._current_steuer_modus(),
+            default_ust_satz=self._current_default_ust_satz(),
+        )
+        for field_key, label_text in amount_labels.items():
+            field_row = self.field_rows.get(field_key)
+            if field_row is not None:
+                field_row.set_label_text(label_text)
+        return payload
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -1092,6 +1158,7 @@ class EinkaufHeadFormWidget(QWidget):
 
             for key, label_text in fields:
                 field_row = InlineChangeFieldRow(key, label_text, self)
+                field_row.valueChanged.connect(self.valueChanged)
                 self.inputs[key] = field_row
                 self.field_rows[key] = field_row
                 frame_layout.addWidget(field_row)
@@ -1116,6 +1183,9 @@ class EinkaufHeadFormWidget(QWidget):
             "§13b UStG: Steuerschuldner ist der Leistungsempfaenger.\n"
             "Wird automatisch angehakt wenn die KI einen entsprechenden Hinweis erkennt.\n"
             "Kann manuell uebersteuert werden."
+        )
+        self.chk_reverse_charge.stateChanged.connect(
+            lambda _state: self.valueChanged.emit("reverse_charge", "1" if self.chk_reverse_charge.isChecked() else "0")
         )
         rc_frame_layout.addWidget(self.chk_reverse_charge)
         rc_frame_layout.addStretch()
@@ -1257,6 +1327,7 @@ class EinkaufHeadFormWidget(QWidget):
 
     def set_payload(self, payload):
         payload = payload if isinstance(payload, dict) else {}
+        payload = self._sync_tax_display_state(dict(payload))
         self._payload_context = dict(payload)
         for key in EINKAUF_VISIBLE_FIELD_KEYS:
             self.inputs[key].setText(str(payload.get(key, "") or ""))
@@ -1272,6 +1343,16 @@ class EinkaufHeadFormWidget(QWidget):
 
         self._update_shop_preview(payload)
         self.set_extra_values(payload)
+
+    def refresh_payload_context(self, payload, update_logo=False):
+        self._payload_context = self._sync_tax_display_state(payload)
+        if "ust_satz" in self.inputs:
+            effective_ust_text = str(self._payload_context.get("ust_satz", "") or "")
+            if str(self.inputs["ust_satz"].text() or "") != effective_ust_text:
+                self.inputs["ust_satz"].setText(effective_ust_text)
+        if update_logo:
+            self._update_shop_preview(self._payload_context)
+        self.set_extra_values(self._payload_context)
 
     def set_review_data(self, review_bundle):
         self._review_bundle = dict(review_bundle or {}) if isinstance(review_bundle, dict) else {}
@@ -1299,15 +1380,19 @@ class EinkaufHeadFormWidget(QWidget):
     def set_extra_values(self, payload):
         self._clear_extra_rows()
         extra_rows = collect_einkauf_extra_fields(payload)
+        summary_tooltips = calculate_purchase_payload_breakdown(payload, settings=self._settings_manager).get("_money_tooltips", {}) or {}
         if not extra_rows:
             self.extra_frame.setVisible(False)
             return
 
-        for label_text, value_text in extra_rows:
+        for field_key, label_text, value_text in extra_rows:
             line_edit = QLineEdit()
             line_edit.setReadOnly(True)
             line_edit.setText(value_text)
             line_edit.setStyleSheet("QLineEdit { background-color: #171824; border: 1px solid #414868; border-radius: 4px; padding: 6px; color: #a9b1d6; }")
+            tooltip_text = str(summary_tooltips.get(field_key, "") or "")
+            if tooltip_text:
+                line_edit.setToolTip(tooltip_text)
             self.extra_form_layout.addRow(QLabel(label_text + ":"), line_edit)
             self._extra_rows.append((label_text, line_edit))
         self.extra_frame.setVisible(True)
@@ -1439,6 +1524,11 @@ class ItemFieldChoiceWidget(QFrame):
         value_row.addWidget(self.edit_new, 1)
 
         layout.addLayout(value_row)
+        tooltip_text = str(self._field_data.get("calculation_tooltip", "") or "").strip()
+        if tooltip_text:
+            self.lbl_field.setToolTip(tooltip_text)
+            self.btn_old.setToolTip(tooltip_text)
+            self.edit_new.setToolTip(tooltip_text)
 
     def _select_old(self):
         if not self.btn_old.isEnabled():
@@ -1460,6 +1550,8 @@ class ItemFieldChoiceWidget(QFrame):
         payload = dict(self._field_data)
         payload["selected_side"] = self._selected_side
         payload["new_value"] = str(self.edit_new.text() or "").strip()
+        self.selectionChanged.emit(payload)
+
     def _apply_styles(self):
         kind = str(self._field_data.get("change_kind", "unchanged") or "unchanged")
         info = FIELD_KIND_STYLES.get(kind, FIELD_KIND_STYLES["unchanged"])
@@ -1987,10 +2079,12 @@ class EinkaufItemsTableWidget(QWidget):
         self._visual_rows = []
         self._source_main_rows = {}
         self._ignore_table_changes = False
-        self._media_preview = _UiMediaPreviewResolver(getattr(parent, "settings_manager", None))
+        self._settings_manager = getattr(parent, "settings_manager", None)
+        self._media_preview = _UiMediaPreviewResolver(self._settings_manager)
         self._payload_context = {}
         self._review_bundle = {}
         self._draft_image_states = {}
+        self._money_tooltips = {"summary": {}, "items": {}}
         self._pending_visual_refresh = False
         self._visual_refresh_timer = QTimer(self)
         self._visual_refresh_timer.setSingleShot(True)
@@ -2083,6 +2177,7 @@ class EinkaufItemsTableWidget(QWidget):
         self._payload_context = {}
         self._review_bundle = {}
         self._draft_image_states = {}
+        self._money_tooltips = {"summary": {}, "items": {}}
         self._rebuild_table()
 
     def clear_review_data(self):
@@ -2095,6 +2190,7 @@ class EinkaufItemsTableWidget(QWidget):
     def set_payload_context(self, payload):
         self._payload_context = dict(payload or {}) if isinstance(payload, dict) else {}
         self._payload_context["waren"] = self.get_items()
+        self._refresh_money_tooltips()
 
     def set_items(self, items, ean_fill_callback=None, payload=None):
         self._items = []
@@ -2120,6 +2216,7 @@ class EinkaufItemsTableWidget(QWidget):
             self._items.append(normalized)
 
         self._payload_context["waren"] = self.get_items()
+        self._refresh_money_tooltips()
         self._rebuild_table()
 
     def set_review_data(self, review_bundle):
@@ -2151,6 +2248,7 @@ class EinkaufItemsTableWidget(QWidget):
             f"{int(summary.get('unclear', 0) or 0)} unklar, "
             f"{int(summary.get('same', 0) or 0)} gleich."
         )
+        self._refresh_money_tooltips()
         self._rebuild_table()
 
     def get_items(self):
@@ -2167,6 +2265,14 @@ class EinkaufItemsTableWidget(QWidget):
         payload = dict(self._payload_context or {}) if isinstance(self._payload_context, dict) else {}
         payload["waren"] = self.get_items()
         return payload
+
+    def _refresh_money_tooltips(self):
+        payload = self._current_payload_snapshot()
+        money_meta = calculate_purchase_payload_breakdown(payload, settings=self._settings_manager)
+        self._money_tooltips = {
+            "summary": dict(money_meta.get("_money_tooltips", {}) or {}),
+            "items": dict(money_meta.get("_item_money_tooltips", {}) or {}),
+        }
 
     def _draft_state_for_row(self, source_index):
         return dict(self._draft_image_states.get(int(source_index), {}) or {})
@@ -2293,10 +2399,16 @@ class EinkaufItemsTableWidget(QWidget):
 
     def _detail_fields_for_row(self, review_row):
         fields = []
+        source_index = int(review_row.get("source_row_index", -1) or -1) if isinstance(review_row, dict) else -1
+        item_tooltips = dict((self._money_tooltips or {}).get("items", {}).get(source_index, {}) or {})
         for field in review_row.get("fields", []) or []:
             kind = str(field.get("change_kind", "") or "")
             if kind in ("item_add", "item_update"):
-                fields.append(dict(field))
+                prepared = dict(field)
+                tooltip_text = str(item_tooltips.get(prepared.get("field_key"), "") or "")
+                if tooltip_text:
+                    prepared["calculation_tooltip"] = tooltip_text
+                fields.append(prepared)
         return fields
 
     def _row_has_detail(self, review_row, source_index=None):
@@ -2559,6 +2671,7 @@ class EinkaufItemsTableWidget(QWidget):
                     field["selected_side"] = "new"
             self._recalculate_review_row(review_row)
         self._payload_context["waren"] = self.get_items()
+        self._refresh_money_tooltips()
         if self._expanded_rows.get(source_index):
             self._rebuild_table(select_source_index=source_index)
         else:
@@ -2586,6 +2699,7 @@ class EinkaufItemsTableWidget(QWidget):
 
         self._recalculate_review_row(review_row)
         self._payload_context["waren"] = self.get_items()
+        self._refresh_money_tooltips()
         if self._expanded_rows.get(source_index):
             self._rebuild_table(select_source_index=source_index)
         else:

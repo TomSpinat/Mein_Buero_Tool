@@ -3,6 +3,7 @@
 import logging
 import time
 from module.crash_logger import log_exception
+from module.money_tooltips import calculate_purchase_costs
 from module.order_change_review import ChangeProposal, build_source_meta_from_payload, format_change_line, summarize_change_counts
 from module.status_model import ShipmentStatus, shipment_db_value
 from module.module1_trace_logger import write_module1_trace
@@ -23,95 +24,14 @@ class OrderProcessingMixin:
         - Versand/Nebenkosten/Rabatt werden zusaetzlich verteilt.
         - Falls keine Zusatzfelder geliefert werden, wird die Differenz zu gesamt_ekp_brutto genutzt.
         """
-        total_units = max(1, len(unit_rows))
-        warenwert_brutto = self._round_money(sum(row["ekp_brutto"] for row in unit_rows))
-
-        header_total = self._to_float(data_dict.get("gesamt_ekp_brutto", 0.0))
-        versand = self._to_float(data_dict.get("versandkosten_brutto", 0.0))
-        neben = self._to_float(data_dict.get("nebenkosten_brutto", 0.0))
-        rabatt = abs(self._to_float(data_dict.get("rabatt_brutto", 0.0)))
-
-        explicit_components = any(
-            self._has_value(data_dict.get(key))
-            for key in ("versandkosten_brutto", "nebenkosten_brutto", "rabatt_brutto")
+        kosten_meta, calculated_rows = calculate_purchase_costs(
+            data_dict,
+            unit_rows,
+            steuer_modus=self.settings.get("steuer_modus", "kleinunternehmer"),
+            default_ust_satz=self.settings.get("default_ust_satz", 19.0),
         )
-
-        if explicit_components:
-            einstand_gesamt = warenwert_brutto + versand + neben - rabatt
-            if header_total > 0 and abs(header_total - einstand_gesamt) > 0.01:
-                delta = header_total - einstand_gesamt
-                if delta >= 0:
-                    neben += delta
-                else:
-                    rabatt += abs(delta)
-                einstand_gesamt = header_total
-        else:
-            if header_total > 0:
-                delta = header_total - warenwert_brutto
-                if delta >= 0:
-                    neben = delta
-                else:
-                    rabatt = abs(delta)
-                einstand_gesamt = header_total
-            else:
-                einstand_gesamt = warenwert_brutto
-
-        versand = self._round_money(versand)
-        neben = self._round_money(neben)
-        rabatt = self._round_money(rabatt)
-        einstand_gesamt = self._round_money(einstand_gesamt)
-
-        extras_total = self._round_money(versand + neben - rabatt)
-
-        use_value_weight = warenwert_brutto > 0.0
-        distributed = []
-        distributed_sum = 0.0
-
-        for row in unit_rows:
-            base = self._to_float(row.get("ekp_brutto", 0.0))
-            if use_value_weight:
-                share_raw = extras_total * (base / warenwert_brutto)
-            else:
-                share_raw = extras_total / total_units
-            share = self._round_money(share_raw)
-            distributed.append(share)
-            distributed_sum += share
-
-        rounding_delta = self._round_money(extras_total - distributed_sum)
-        if distributed and abs(rounding_delta) > 0:
-            distributed[-1] = self._round_money(distributed[-1] + rounding_delta)
-
-        steuer_modus = self.settings.get("steuer_modus", "kleinunternehmer")
-        is_reverse_charge = bool(data_dict.get("reverse_charge", False))
-        ust_satz = self._to_float(
-            data_dict.get("ust_satz") or self.settings.get("default_ust_satz", 19.0)
-        )
-        netto_ust = 0.0 if (steuer_modus != "regelbesteuerung" or is_reverse_charge) else ust_satz
-
-        for idx, row in enumerate(unit_rows):
-            bezugskosten_anteil = distributed[idx] if idx < len(distributed) else 0.0
-            row["bezugskosten_anteil_brutto"] = self._round_money(bezugskosten_anteil)
-            row["einstand_brutto"] = self._round_money(
-                self._to_float(row.get("ekp_brutto", 0.0)) + bezugskosten_anteil
-            )
-            row["ust_satz_ekp"] = ust_satz
-            row["reverse_charge"] = is_reverse_charge
-            if steuer_modus == "regelbesteuerung":
-                row["einstand_netto"] = self._to_netto(row["einstand_brutto"], netto_ust)
-            else:
-                row["einstand_netto"] = row["einstand_brutto"]
-
-        einstand_gesamt_netto = self._to_netto(einstand_gesamt, netto_ust)
-
-        return {
-            "warenwert_brutto": warenwert_brutto,
-            "versandkosten_brutto": versand,
-            "nebenkosten_brutto": neben,
-            "rabatt_brutto": rabatt,
-            "einstand_gesamt_brutto": einstand_gesamt,
-            "einstand_gesamt_netto": einstand_gesamt_netto,
-            "reverse_charge": is_reverse_charge,
-        }
+        unit_rows[:] = calculated_rows
+        return kosten_meta
 
     def _enrich_existing_order_positions(self, cursor, einkauf_id, unit_rows):
         """
@@ -774,6 +694,15 @@ class OrderProcessingMixin:
 
             if unit_rows:
                 kosten_meta = self._calculate_order_costs(data_dict, unit_rows)
+                for source_index, source_costs in (kosten_meta.get("_source_row_costs", {}) or {}).items():
+                    if int(source_index) < 0 or int(source_index) >= len(input_rows):
+                        continue
+                    input_rows[int(source_index)]["bezugskosten_anteil_brutto"] = self._round_money(
+                        source_costs.get("bezugskosten_anteil_brutto", 0.0)
+                    )
+                    input_rows[int(source_index)]["einstand_brutto"] = self._round_money(
+                        source_costs.get("einstand_brutto", 0.0)
+                    )
             else:
                 kosten_meta = {
                     "warenwert_brutto": 0.0,
@@ -856,6 +785,11 @@ class OrderProcessingMixin:
                 return {"add": "item_add", "overwrite": "item_update"}.get(kind, kind)
 
             def _push(target, etype, ident, key, label, old, new, kind, meta=None):
+                if kind in ("overwrite", "item_update"):
+                    old_text = str(old or "").strip()
+                    new_text = str(new or "").strip()
+                    if old_text == new_text:
+                        kind = "unchanged"
                 row = ChangeProposal(
                     entity_type=etype,
                     entity_identifier=str(ident),

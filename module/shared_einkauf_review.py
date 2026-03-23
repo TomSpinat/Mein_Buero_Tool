@@ -213,8 +213,11 @@ def refresh_summen_banner(banner_widget, items_widget, payload) -> None:
     payload:       Payload-Dict mit optionalem 'gesamt_ekp_brutto'.
   """
   items = items_widget.get_items()
-  gesamt = (payload or {}).get("gesamt_ekp_brutto", 0) if isinstance(payload, dict) else 0
-  banner_widget.update_from_items(items, gesamt)
+  safe_payload = payload if isinstance(payload, dict) else {}
+  gesamt = safe_payload.get("gesamt_ekp_brutto", 0)
+  parent_widget = banner_widget.parent() if hasattr(banner_widget, "parent") else None
+  settings = getattr(parent_widget, "settings_manager", None)
+  banner_widget.update_from_items(items, gesamt, payload=safe_payload, settings=settings)
 
 
 # ── Validierung und Warnungen ────────────────────────────────────────────────

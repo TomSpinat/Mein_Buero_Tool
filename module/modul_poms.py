@@ -42,8 +42,11 @@ class StatsCard(QFrame):
         layout.addStretch()
         layout.addWidget(self.count_label)
 
-    def update_value(self, new_value):
+    def update_value(self, new_value, tooltip=""):
         self.count_label.setText(str(new_value))
+        tooltip_text = str(tooltip or "").strip()
+        self.count_label.setToolTip(tooltip_text)
+        self.setToolTip(tooltip_text)
 
 
 class PomsModule(QWidget):
@@ -198,10 +201,11 @@ class PomsModule(QWidget):
 
     def refresh_data(self):
         stats = self.view_service.get_stats()
+        stat_tooltips = stats.get("_money_tooltips", {}) if isinstance(stats, dict) else {}
         for key, value in stats.items():
             if key in self.stats_cards:
                 text = f"{value:.2f} EUR" if "revenue" in key or "profit" in key else str(value)
-                self.stats_cards[key].update_value(text)
+                self.stats_cards[key].update_value(text, stat_tooltips.get(key, ""))
 
         orders = self.view_service.get_rows(show_all=self.show_all, filter_type=self.current_filter)
         self.table.setRowCount(0)
@@ -220,7 +224,11 @@ class PomsModule(QWidget):
             ek = order.get("ek") or 0.0
             vk = order.get("vk") or 0.0
             win = order.get("win") or 0.0
-            self.table.setItem(row_idx, 6, self._make_item(f"{ek:.2f}"))
+            row_tooltips = order.get("_money_tooltips", {}) if isinstance(order, dict) else {}
+            ek_item = self._make_item(f"{ek:.2f}")
+            if row_tooltips.get("ek"):
+                ek_item.setToolTip(str(row_tooltips.get("ek") or ""))
+            self.table.setItem(row_idx, 6, ek_item)
             self.table.setItem(row_idx, 7, self._make_item(f"{vk:.2f}"))
 
             win_item = self._make_item(f"{win:.2f}")
@@ -228,6 +236,8 @@ class PomsModule(QWidget):
                 win_item.setForeground(QColor("green"))
             elif win < 0:
                 win_item.setForeground(QColor("red"))
+            if row_tooltips.get("win"):
+                win_item.setToolTip(str(row_tooltips.get("win") or ""))
             self.table.setItem(row_idx, 8, win_item)
 
             self._build_status_combo(row_idx, order["id"], "inventory_status", POMS_ORDER_OPTIONS, order.get("inventory_status"))

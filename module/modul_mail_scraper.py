@@ -55,7 +55,9 @@ from module.shared_einkauf_review import (
   collect_einkauf_payload,
   apply_einkauf_review_workflow,
   prepare_and_save_einkauf_workflow,
+  refresh_summen_banner,
 )
+from module.money_tooltips import calculate_purchase_payload_breakdown
 from module.normalization_dialog import NormalizationPanel
 from module.amazon_country_dialog import AmazonCountryPanel
 from module.ean_service import EanService
@@ -1223,6 +1225,15 @@ class MailScraperApp(QWidget):
     if log_message:
       self._log(str(log_message).strip())
 
+  def _finalize_scan_with_uid_commit(self, success_text, fallback_text, log_message=None):
+    committed_uid = self._commit_last_mail_uid()
+    text = str(success_text if committed_uid else fallback_text).strip()
+    if text:
+      self.pipeline_dashboard.set_status_text(text)
+    if log_message:
+      self._log(str(log_message).strip())
+    return committed_uid
+
   def _commit_last_mail_uid(self):
     runtime = self._scan_runtime if isinstance(self._scan_runtime, dict) else {}
     highest_uid = int(runtime.get("highest_uid", 0) or 0)
@@ -1902,11 +1913,17 @@ class MailScraperApp(QWidget):
             "Scan teilweise fehlgeschlagen: keine vollstaendig uebernehmbaren Belege; Fortschritt bleibt unveraendert.",
           )
         else:
-          self._finalize_scan_without_uid_commit(
-            "Cloudscan beendet, aber es wurden keine verwertbaren Belege erkannt. last_mail_uid wurde nicht fortgeschrieben.",
+          committed_uid = self._finalize_scan_with_uid_commit(
+            "Cloudscan beendet. Es wurden keine verwertbaren Belege erkannt, aber last_mail_uid wurde fortgeschrieben.",
+            "Cloudscan beendet, aber last_mail_uid konnte nicht fortgeschrieben werden.",
             "Suche beendet. Keine neuen/verwertbaren Belege gefunden.",
           )
-        QMessageBox.information(self, "Ergebnis", "Keine neuen Belege in den letzten E-Mails gefunden.")
+        result_text = (
+          "Keine neuen Belege in den letzten E-Mails gefunden.\n\nlast_mail_uid wurde fortgeschrieben."
+          if partial_count <= 0 and hard_quota_hits <= 0 and committed_uid
+          else "Keine neuen Belege in den letzten E-Mails gefunden."
+        )
+        QMessageBox.information(self, "Ergebnis", result_text)
         return
 
       self.pipeline_dashboard.set_status_text(f"{len(extracted_data_list)} Beleg(e) wurden vorbereitet und koennen jetzt im Wizard geprueft werden.")
@@ -1928,11 +1945,17 @@ class MailScraperApp(QWidget):
         if skipped_count > 0:
           self._log(f"{skipped_count} von {original_count} Mails wurden bereits verarbeitet und uebersprungen.")
           if not filtered_data_list:
-            self._finalize_scan_without_uid_commit(
-              "Alle erkannten Mails waren bereits vorhanden. last_mail_uid wurde in diesem Lauf nicht fortgeschrieben.",
+            committed_uid = self._finalize_scan_with_uid_commit(
+              "Alle erkannten Mails waren bereits vorhanden. last_mail_uid wurde fortgeschrieben.",
+              "Alle erkannten Mails waren bereits vorhanden, aber last_mail_uid konnte nicht fortgeschrieben werden.",
               "Keine neue Uebernahme noetig; Fortschritt bleibt unveraendert.",
             )
-            QMessageBox.information(self, "Ergebnis", f"Alle {original_count} erkannten Mails wurden bereits verarbeitet.")
+            result_text = (
+              f"Alle {original_count} erkannten Mails wurden bereits verarbeitet.\n\nlast_mail_uid wurde fortgeschrieben."
+              if committed_uid
+              else f"Alle {original_count} erkannten Mails wurden bereits verarbeitet."
+            )
+            QMessageBox.information(self, "Ergebnis", result_text)
             return
       except Exception as dedup_err:
         log_exception(__name__, dedup_err)
@@ -3582,6 +3605,7 @@ class ScraperReviewWizardDialog(QDialog):
 
     self.einkauf_form_widget = EinkaufHeadFormWidget(self)
     self.einkauf_form_widget.logoSearchRequested.connect(self._on_manual_logo_search_requested)
+    self.einkauf_form_widget.valueChanged.connect(self._on_einkauf_form_value_changed)
     self.inputs = self.einkauf_form_widget.inputs
     self.einkauf_form_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
     kopf_box.addWidget(self.einkauf_form_widget)
@@ -3627,6 +3651,7 @@ class ScraperReviewWizardDialog(QDialog):
     self.einkauf_items_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
     self.einkauf_items_widget.table.setMinimumHeight(280)
     self.table_waren = self.einkauf_items_widget.table
+    self.table_waren.itemChanged.connect(self._on_waren_table_changed)
     artikel_box.addWidget(self.einkauf_items_widget, 1)
 
     self.summen_banner = SummenBannerWidget(self)
@@ -3951,7 +3976,41 @@ class ScraperReviewWizardDialog(QDialog):
     )
     self._shared_db = result["db"]
     self._current_einkauf_report = result["report"]
+    self._refresh_einkauf_live_calculations()
     return result
+
+  def _build_live_einkauf_payload(self):
+    payload = collect_einkauf_payload(
+      self.einkauf_form_widget,
+      self.einkauf_items_widget,
+      self._current_mail_record(),
+    )
+    money_meta = calculate_purchase_payload_breakdown(payload, settings=self.settings_manager)
+    for key in ("warenwert_brutto", "einstand_gesamt_brutto", "einstand_gesamt_netto", "ust_satz"):
+      if key in money_meta:
+        if key == "ust_satz":
+          payload[key] = f"{float(money_meta.get(key) or 0.0):.2f}".rstrip("0").rstrip(".")
+        else:
+          payload[key] = money_meta.get(key)
+    return payload
+
+  def _refresh_einkauf_live_calculations(self, update_logo=False):
+    if not self._has_current_mail():
+      return
+    payload = self._build_live_einkauf_payload()
+    merged = dict(self._current_mail_record())
+    merged.update(payload)
+    self._set_current_mail_data(merged)
+    self.einkauf_form_widget.refresh_payload_context(merged, update_logo=update_logo)
+    self.einkauf_items_widget.set_payload_context(merged)
+    refresh_summen_banner(self.summen_banner, self.einkauf_items_widget, merged)
+
+  def _on_einkauf_form_value_changed(self, field_key, _value):
+    update_logo = str(field_key or "") in ("shop_name", "bestell_email")
+    self._refresh_einkauf_live_calculations(update_logo=update_logo)
+
+  def _on_waren_table_changed(self, item):
+    self._refresh_einkauf_live_calculations()
 
   def _clear_mapping_panel(self):
     while self.mapping_panel_host.count():

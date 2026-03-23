@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (
 )
 
 from module.database_manager import DatabaseManager
+from module.money_tooltips import build_finance_money_tooltips
 from module.status_model import InventoryStatus
 
 from module.crash_logger import log_exception
@@ -118,6 +119,11 @@ class FinanzenApp(QWidget):
     def _fmt_pct(self, value):
         return f"{float(value or 0.0):,.2f} %".replace(',', 'X').replace('.', ',').replace('X', '.')
 
+    def _set_money_tooltip(self, widget, text):
+        if widget is None:
+            return
+        widget.setToolTip(str(text or "").strip())
+
     def refresh_data(self):
         steuer_modus = self.settings.get("steuer_modus", "kleinunternehmer")
         is_regelbesteuerung = steuer_modus == "regelbesteuerung"
@@ -197,11 +203,30 @@ class FinanzenApp(QWidget):
             self.lbl_bezugskosten.setText(self._fmt_eur(bezugskosten))
             self.lbl_einstand.setText(self._fmt_eur(einstand))
 
+            finance_tooltips = build_finance_money_tooltips(
+                {
+                    "lagerwert": lagerwert,
+                    "forderungen": forderungen,
+                    "gewinn": gewinn,
+                    "gewinn_netto": gewinn_netto,
+                    "bezugskosten": bezugskosten,
+                    "einstand": einstand,
+                }
+            )
+            self._set_money_tooltip(self.lbl_lager, finance_tooltips.get("lagerwert"))
+            self._set_money_tooltip(self.lbl_forderungen, finance_tooltips.get("forderungen"))
+            self._set_money_tooltip(self.lbl_gewinn, finance_tooltips.get("gewinn"))
+            self._set_money_tooltip(self.lbl_gewinn_netto, finance_tooltips.get("gewinn_netto"))
+            self._set_money_tooltip(self.lbl_bezugskosten, finance_tooltips.get("bezugskosten"))
+            self._set_money_tooltip(self.lbl_einstand, finance_tooltips.get("einstand"))
+
             if is_regelbesteuerung:
                 self.lbl_gewinn_netto.setText(f"Netto: {self._fmt_eur(gewinn_netto)}")
                 self.lbl_gewinn_netto.setVisible(True)
             else:
                 self.lbl_gewinn_netto.setVisible(False)
+                self._set_money_tooltip(self.lbl_vorsteuer, "")
+                self._set_money_tooltip(self.lbl_ust_schuld, "")
 
             if is_regelbesteuerung:
                 cursor.execute(
@@ -243,6 +268,20 @@ class FinanzenApp(QWidget):
                 self.lbl_vorsteuer.setText(self._fmt_eur(vorsteuer))
                 self.lbl_ust_schuld.setText(self._fmt_eur(ust_schuld))
                 self.lbl_netto_marge.setText(self._fmt_pct(netto_marge_pct))
+                finance_tooltips = build_finance_money_tooltips(
+                    {
+                        "lagerwert": lagerwert,
+                        "forderungen": forderungen,
+                        "gewinn": gewinn,
+                        "gewinn_netto": gewinn_netto,
+                        "bezugskosten": bezugskosten,
+                        "einstand": einstand,
+                        "vorsteuer": vorsteuer,
+                        "ust_schuld": ust_schuld,
+                    }
+                )
+                self._set_money_tooltip(self.lbl_vorsteuer, finance_tooltips.get("vorsteuer"))
+                self._set_money_tooltip(self.lbl_ust_schuld, finance_tooltips.get("ust_schuld"))
 
             cursor.close()
             conn.close()

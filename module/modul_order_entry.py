@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
     QSizePolicy, QMessageBox, QApplication, QTextEdit,
     QTableWidget, QTableWidgetItem, QHeaderView, QRadioButton, QButtonGroup,
     QTabWidget, QComboBox, QFileDialog, QMenu, QDialog, QDialogButtonBox, QSpinBox,
-    QScrollArea,
+    QScrollArea, QSplitter,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QMimeData, QSize, QThread
 from PyQt6.QtGui import QPixmap, QImage, QClipboard, QPainter
@@ -66,6 +66,9 @@ from module.lookup_service import LookupService
 from module.lookup_results import FieldState, FieldType, LookupSource
 from module.field_lookup_binding import FieldLookupBinding, create_bindings
 from module.einkauf_ui import EinkaufHeadFormWidget, EinkaufItemsTableWidget, SummenBannerWidget, OrderReviewPanelWidget, set_field_state
+from module.money_tooltips import calculate_purchase_payload_breakdown
+from module.normalization_dialog import NormalizationPanel
+from module.amazon_country_dialog import AmazonCountryPanel, SPECIFIC_AMAZON_VALUES
 class GeminiWorker(QThread):
     finished_signal = pyqtSignal(dict)
     error_signal = pyqtSignal(str)
@@ -210,6 +213,9 @@ class OrderEntryApp(QWidget):
         self._lookup_db = DatabaseManager(self.settings_manager)
         self._lookup_service = LookupService(self._lookup_db)
         self._lookup_bindings: dict[str, FieldLookupBinding] = {}
+        self._mapping_state = None
+        self._mapping_done = True
+        self._mapping_prompted = False
 
         self.main_layout = QVBoxLayout(self)
         self.tabs = QTabWidget()
@@ -320,6 +326,11 @@ class OrderEntryApp(QWidget):
         self.lbl_form = QLabel()
         self.lbl_form.setVisible(False)
 
+        # ── Mittelbereich + rechtes Mapping-Fach ──────────────────────────────
+        self.content_splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        self.content_splitter.setChildrenCollapsible(False)
+        right_layout.addWidget(self.content_splitter, 1)
+
         # ── Tab-Widget ─────────────────────────────────────────────────────────
         self.data_tabs = QTabWidget()
         self.data_tabs.setStyleSheet(
@@ -342,6 +353,7 @@ class OrderEntryApp(QWidget):
 
         self.einkauf_form_widget = EinkaufHeadFormWidget(self, logo_search_mode="direct")
         self.einkauf_form_widget.logoSearchRequested.connect(self._start_logo_search_from_context)
+        self.einkauf_form_widget.valueChanged.connect(self._on_einkauf_form_value_changed)
         self.einkauf_form_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self._einkauf_form_scroll = self.einkauf_form_widget
         kopf_box.addWidget(self._einkauf_form_scroll)
@@ -470,7 +482,66 @@ class OrderEntryApp(QWidget):
         uebersicht_scroll.setWidget(uebersicht_panel)
         self.data_tabs.addTab(uebersicht_scroll, "Uebersicht")
 
-        right_layout.addWidget(self.data_tabs, 1)
+        self.content_splitter.addWidget(self.data_tabs)
+
+        self.mapping_panel_widget = QWidget(self)
+        self.mapping_panel_widget.setMinimumWidth(260)
+        self.mapping_panel_widget.setMaximumWidth(420)
+        mapping_box = QVBoxLayout(self.mapping_panel_widget)
+        mapping_box.setContentsMargins(0, 0, 0, 0)
+        mapping_box.setSpacing(12)
+
+        lbl_mapping = QLabel("Mapping und Normalisierung")
+        lbl_mapping.setStyleSheet("font-size: 14px; font-weight: bold;")
+        mapping_box.addWidget(lbl_mapping)
+
+        self.lbl_mapping_state = QLabel("Kein Mapping offen")
+        self.lbl_mapping_state.setStyleSheet("font-size: 12px; color: #6b7280;")
+        self.btn_run_mapping = QPushButton("Keine Aktion offen")
+        self.btn_run_mapping.setEnabled(False)
+        self.btn_run_mapping.clicked.connect(self._on_run_mapping_clicked)
+
+        mapping_state_row = QHBoxLayout()
+        mapping_state_row.addWidget(self.lbl_mapping_state, 1)
+        mapping_state_row.addWidget(self.btn_run_mapping)
+        mapping_box.addLayout(mapping_state_row)
+
+        self.lbl_mapping_side_hint = QLabel(
+            "Offene Zuordnungen erscheinen hier rechts, waehrend du links die Daten weiter pruefen kannst."
+        )
+        self.lbl_mapping_side_hint.setWordWrap(True)
+        self.lbl_mapping_side_hint.setStyleSheet("font-size: 12px; color: #a9b1d6;")
+        mapping_box.addWidget(self.lbl_mapping_side_hint)
+
+        self.mapping_frame = QFrame()
+        self.mapping_frame.setStyleSheet(
+            "QFrame { background-color: #202233; border: 1px solid #414868; border-radius: 6px; }"
+        )
+        mapping_layout = QVBoxLayout(self.mapping_frame)
+        mapping_layout.setContentsMargins(14, 14, 14, 14)
+        mapping_layout.setSpacing(10)
+
+        self.lbl_mapping_panel_title = QLabel("Mapping-Bereich")
+        self.lbl_mapping_panel_title.setStyleSheet("font-size: 14px; font-weight: bold; color: #7aa2f7;")
+        mapping_layout.addWidget(self.lbl_mapping_panel_title)
+
+        self.lbl_mapping_panel_hint = QLabel("")
+        self.lbl_mapping_panel_hint.setWordWrap(True)
+        self.lbl_mapping_panel_hint.setStyleSheet("font-size: 12px; color: #a9b1d6;")
+        mapping_layout.addWidget(self.lbl_mapping_panel_hint)
+
+        self.mapping_panel_host = QVBoxLayout()
+        self.mapping_panel_host.setContentsMargins(0, 0, 0, 0)
+        mapping_layout.addLayout(self.mapping_panel_host)
+        mapping_box.addWidget(self.mapping_frame, 1)
+        mapping_box.addStretch(1)
+
+        self.content_splitter.addWidget(self.mapping_panel_widget)
+        self.content_splitter.setStretchFactor(0, 7)
+        self.content_splitter.setStretchFactor(1, 3)
+        self._active_mapping_panel = None
+        self._active_mapping_context = None
+        self._set_mapping_panel_collapsed(True)
 
         # Initial die Tabelle und das Formular aufbauen
         self._build_dynamic_form()
@@ -490,6 +561,350 @@ class OrderEntryApp(QWidget):
 
         right_layout.addLayout(button_layout)
         self.scanner_layout.addLayout(right_layout, stretch=2)
+
+    def _clear_mapping_panel(self):
+        while self.mapping_panel_host.count():
+            item = self.mapping_panel_host.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        self._active_mapping_panel = None
+
+    def _set_mapping_panel_collapsed(self, collapsed):
+        sizes = self.content_splitter.sizes()
+        if len(sizes) < 2:
+            return
+        total = max(1, sum(sizes))
+        if collapsed:
+            panel_width = 210
+            self.mapping_panel_widget.setMinimumWidth(190)
+            self.mapping_panel_widget.setMaximumWidth(220)
+            self.mapping_frame.setVisible(False)
+            self.lbl_mapping_side_hint.setVisible(False)
+            self.content_splitter.setSizes([max(260, total - panel_width), panel_width])
+        else:
+            panel_width = min(360, max(280, int(total * 0.34)))
+            self.mapping_panel_widget.setMinimumWidth(280)
+            self.mapping_panel_widget.setMaximumWidth(420)
+            self.mapping_frame.setVisible(True)
+            self.lbl_mapping_side_hint.setVisible(True)
+            self.content_splitter.setSizes([max(420, total - panel_width), panel_width])
+
+    def _clear_embedded_mapping_request(self):
+        self._active_mapping_context = None
+        self._mapping_state = None
+        self._mapping_done = True
+        self._mapping_prompted = False
+        self._clear_mapping_panel()
+        self.lbl_mapping_state.setText("Kein Mapping offen")
+        self.lbl_mapping_state.setStyleSheet("font-size: 12px; color: #6b7280;")
+        self.btn_run_mapping.setText("Keine Aktion offen")
+        self.btn_run_mapping.setEnabled(False)
+        self.lbl_mapping_panel_title.setText("Mapping-Bereich")
+        self.lbl_mapping_panel_hint.setText("")
+        self._set_mapping_panel_collapsed(True)
+
+    def _show_embedded_mapping_panel(self, panel, *, title, hint, context):
+        self._clear_mapping_panel()
+        self._active_mapping_context = dict(context or {})
+        self._active_mapping_panel = panel
+        if hasattr(panel, "selection_confirmed"):
+            panel.selection_confirmed.connect(self._on_mapping_panel_completed)
+        if hasattr(panel, "cancel_requested"):
+            panel.cancel_requested.connect(self._clear_embedded_mapping_request)
+        self.lbl_mapping_panel_title.setText(str(title or "Mapping-Bereich"))
+        self.lbl_mapping_panel_hint.setText(str(hint or ""))
+        self.mapping_panel_host.addWidget(panel)
+        field_label = str(self._active_mapping_context.get("field_label", "Wert") or "Wert")
+        self.lbl_mapping_state.setText(f"Zuordnung offen: {field_label}")
+        self.lbl_mapping_state.setStyleSheet("font-size: 12px; color: #f7c66f;")
+        self.btn_run_mapping.setText("Rechts anzeigen")
+        self.btn_run_mapping.setEnabled(True)
+        self._set_mapping_panel_collapsed(False)
+
+    def _open_shop_amazon_mapping_panel(self, raw_name):
+        raw_text = str(raw_name or "Amazon").strip() or "Amazon"
+        panel = AmazonCountryPanel(raw_value=raw_text, mode="embedded", parent=self.mapping_frame)
+        self._show_embedded_mapping_panel(
+            panel,
+            title="Shop-Zuordnung: Amazon-Land",
+            hint=f"Die KI hat '{raw_text}' erkannt. Bitte waehle rechts den passenden Amazon-Shop.",
+            context={
+                "kind": "shop_amazon",
+                "field_key": "shop_name",
+                "field_label": "Shop-Name",
+                "raw_value": raw_text,
+            },
+        )
+
+    def _open_normalization_mapping_panel(self, *, field_key, field_label, category, raw_value):
+        raw_text = str(raw_value or "").strip()
+        if not raw_text:
+            return
+        panel = NormalizationPanel(category, raw_text, mode="embedded", parent=self.mapping_frame)
+        self._show_embedded_mapping_panel(
+            panel,
+            title=f"{field_label} zuordnen",
+            hint=f"Der erkannte Rohwert lautet '{raw_text}'. Rechts kannst du ihn uebernehmen oder einem Standard zuordnen.",
+            context={
+                "kind": "normalization",
+                "field_key": str(field_key or ""),
+                "field_label": str(field_label or field_key or "Wert"),
+                "category": str(category or ""),
+                "raw_value": raw_text,
+            },
+        )
+
+    def _on_run_mapping_clicked(self):
+        self._set_mapping_panel_collapsed(False)
+        self._run_mapping_for_current_scan(show_feedback=True, rebuild=True)
+
+    def _clear_inline_suggestions(self):
+        for widget in self.inputs.values():
+            if hasattr(widget, "clear_suggestions"):
+                widget.clear_suggestions()
+
+    def _trigger_review_lookups_only(self):
+        if self.scan_mode != "einkauf":
+            return
+        for key in ("bestellnummer", "kaufdatum"):
+            binding = self._lookup_bindings.get(key)
+            widget = self.inputs.get(key)
+            if not binding or not widget:
+                continue
+            text = str(widget.text() or "").strip()
+            if text:
+                binding.set_state(FieldState.AI_SUGGESTED)
+                binding.trigger_lookup(text)
+            else:
+                binding.set_state(FieldState.EMPTY)
+
+    def _apply_payload_to_current_scan(self, payload):
+        merged = dict(self.current_gemini_data or {})
+        if isinstance(payload, dict):
+            merged.update(payload)
+        self.current_gemini_data = merged
+        self._clear_inline_suggestions()
+        apply_einkauf_review_workflow(
+            self.einkauf_form_widget,
+            self.einkauf_items_widget,
+            self.summen_banner,
+            merged,
+            ean_callback=self.ean_service.find_best_local_ean_by_name,
+        )
+        self._update_save_button_state()
+        self._trigger_review_lookups_only()
+
+    def _build_live_einkauf_payload(self):
+        payload = collect_einkauf_payload(
+            self.einkauf_form_widget,
+            self.einkauf_items_widget,
+            self.current_gemini_data,
+        )
+        money_meta = calculate_purchase_payload_breakdown(payload, settings=self.settings_manager)
+        for key in ("warenwert_brutto", "einstand_gesamt_brutto", "einstand_gesamt_netto", "ust_satz"):
+            if key in money_meta:
+                if key == "ust_satz":
+                    payload[key] = f"{float(money_meta.get(key) or 0.0):.2f}".rstrip("0").rstrip(".")
+                else:
+                    payload[key] = money_meta.get(key)
+        return payload
+
+    def _refresh_einkauf_live_calculations(self, update_logo=False):
+        if self.scan_mode != "einkauf":
+            return
+        payload = self._build_live_einkauf_payload()
+        merged = dict(self.current_gemini_data or {})
+        merged.update(payload)
+        self.current_gemini_data = merged
+        self.einkauf_form_widget.refresh_payload_context(merged, update_logo=update_logo)
+        self.einkauf_items_widget.set_payload_context(merged)
+        refresh_summen_banner(self.summen_banner, self.einkauf_items_widget, merged)
+
+    def _on_einkauf_form_value_changed(self, field_key, _value):
+        if self.scan_mode != "einkauf":
+            return
+        update_logo = str(field_key or "") in ("shop_name", "bestell_email")
+        self._refresh_einkauf_live_calculations(update_logo=update_logo)
+        self._update_save_button_state()
+
+    def _ensure_mapping_state(self, rebuild=False, source_payload=None):
+        if not rebuild and isinstance(self._mapping_state, dict):
+            return self._mapping_state
+        workflow = EinkaufPipeline.prepare_mapping_workflow(source_payload or self.current_gemini_data or {})
+        self._mapping_state = {
+            "payload": dict(workflow.get("payload", {}) or {}),
+            "tasks": list(workflow.get("tasks", []) or []),
+            "task_index": 0,
+        }
+        self.current_gemini_data.update(self._mapping_state["payload"])
+        self._mapping_done = len(self._mapping_state["tasks"]) == 0
+        return self._mapping_state
+
+    def _current_mapping_state(self):
+        return self._mapping_state if isinstance(self._mapping_state, dict) else None
+
+    def _get_current_task_index(self):
+        state = self._current_mapping_state()
+        if not state:
+            return 0
+        return int(state.get("task_index", 0) or 0)
+
+    def _set_current_task_index(self, task_index):
+        state = self._current_mapping_state()
+        if state:
+            state["task_index"] = int(task_index or 0)
+
+    def _has_pending_mapping_tasks(self):
+        state = self._current_mapping_state()
+        if not state:
+            return False
+        return self._get_current_task_index() < len(list(state.get("tasks", []) or []))
+
+    def _advance_to_next_task(self):
+        state = self._current_mapping_state()
+        if not state:
+            return
+        next_index = self._get_current_task_index() + 1
+        self._set_current_task_index(next_index)
+        self._mapping_done = next_index >= len(list(state.get("tasks", []) or []))
+
+    def _mapping_task_hint_text(self, task):
+        raw_value = str((task or {}).get("raw_value", "") or "").strip() or "-"
+        if (task or {}).get("task_type") == "amazon_country":
+            return f"Erkannter Rohwert: {raw_value}. Bitte waehle jetzt rechts den passenden Amazon-Shop."
+        return f"Erkannter Rohwert: {raw_value}. Du kannst ihn rechts uebernehmen oder einem Standard zuordnen."
+
+    def _render_mapping_panel_for_current_scan(self):
+        state = self._current_mapping_state()
+        if not state or not self._has_pending_mapping_tasks():
+            self.mapping_frame.setVisible(False)
+            self._clear_mapping_panel()
+            return
+
+        tasks = list(state.get("tasks", []) or [])
+        task_index = self._get_current_task_index()
+        task = tasks[task_index]
+        self._clear_mapping_panel()
+        self.mapping_frame.setVisible(True)
+        self.lbl_mapping_panel_title.setText(
+            f"Mapping-Schritt {task_index + 1}/{len(tasks)}: {str(task.get('label', 'Mapping') or 'Mapping')}"
+        )
+        self.lbl_mapping_panel_hint.setText(self._mapping_task_hint_text(task))
+
+        if task.get("task_type") == "amazon_country":
+            panel = AmazonCountryPanel(raw_value=task.get("raw_value", "Amazon"), mode="embedded", parent=self.mapping_frame)
+        else:
+            panel = NormalizationPanel(task.get("category", "shops"), task.get("raw_value", ""), mode="embedded", parent=self.mapping_frame)
+        panel.selection_confirmed.connect(self._on_mapping_panel_completed)
+        if hasattr(panel, "cancel_requested"):
+            panel.cancel_requested.connect(self._clear_embedded_mapping_request)
+        self.mapping_panel_host.addWidget(panel)
+        self._active_mapping_panel = panel
+
+    def _update_mapping_state_ui(self):
+        state = self._current_mapping_state() or {}
+        tasks = list(state.get("tasks", []) or []) if isinstance(state, dict) else []
+        remaining = max(0, len(tasks) - self._get_current_task_index())
+
+        if self._mapping_done:
+            self.lbl_mapping_state.setText("Mapping: erledigt")
+            self.lbl_mapping_state.setStyleSheet("font-size: 12px; color: #9ece6a;")
+            self.btn_run_mapping.setText("Mapping erneut pruefen")
+            self.btn_run_mapping.setEnabled(True)
+            self._set_mapping_panel_collapsed(True)
+        elif remaining > 0:
+            self.lbl_mapping_state.setText(f"Mapping: {remaining} Schritt(e) offen")
+            self.lbl_mapping_state.setStyleSheet("font-size: 12px; color: #f7c66f;")
+            self.btn_run_mapping.setText("Mapping-Bereich anzeigen")
+            self.btn_run_mapping.setEnabled(True)
+            self._set_mapping_panel_collapsed(False)
+        else:
+            self.lbl_mapping_state.setText("Mapping: offen")
+            self.lbl_mapping_state.setStyleSheet("font-size: 12px; color: #f7c66f;")
+            self.btn_run_mapping.setText("Mapping jetzt starten")
+            self.btn_run_mapping.setEnabled(True)
+            self._set_mapping_panel_collapsed(True)
+
+    def _refresh_mapping_panel_and_ui(self):
+        self._render_mapping_panel_for_current_scan()
+        self._update_mapping_state_ui()
+
+    def _run_mapping_for_current_scan(self, show_feedback=True, rebuild=False):
+        try:
+            payload = collect_einkauf_payload(
+                self.einkauf_form_widget,
+                self.einkauf_items_widget,
+                self.current_gemini_data,
+            )
+            state = self._ensure_mapping_state(rebuild=rebuild, source_payload=payload)
+            self._apply_payload_to_current_scan(state.get("payload", {}))
+
+            if not self._has_pending_mapping_tasks():
+                self._mapping_done = True
+                self._clear_mapping_panel()
+                if show_feedback:
+                    self.mapping_frame.setVisible(True)
+                    self.lbl_mapping_panel_title.setText("Keine offene Mapping-Aufgabe")
+                    self.lbl_mapping_panel_hint.setText("Fuer diesen Beleg ist aktuell kein weiterer Mapping-Schritt noetig.")
+                else:
+                    self.mapping_frame.setVisible(False)
+                self._update_mapping_state_ui()
+                return
+
+            self._mapping_done = False
+            self._mapping_prompted = True
+            self._refresh_mapping_panel_and_ui()
+        except Exception as e:
+            log_exception(__name__, e)
+            CustomMsgBox.critical(self, "Mapping-Fehler", f"Das Mapping konnte nicht vorbereitet werden:\n{e}")
+
+    def _on_mapping_panel_completed(self, selected_value):
+        state = self._current_mapping_state()
+        if not state:
+            context = dict(self._active_mapping_context or {})
+            field_key = str(context.get("field_key", "") or "").strip()
+            if not field_key or field_key not in self.inputs:
+                self._clear_embedded_mapping_request()
+                return
+            normalized = str(selected_value or "").strip()
+            self.inputs[field_key].setText(normalized)
+            self.current_gemini_data[field_key] = normalized
+            binding = self._lookup_bindings.get(field_key)
+            if binding:
+                binding.set_state(FieldState.USER_CONFIRMED)
+                if normalized:
+                    binding.trigger_lookup(normalized)
+            self._clear_embedded_mapping_request()
+            return
+
+        tasks = list(state.get("tasks", []) or [])
+        task_index = self._get_current_task_index()
+        if task_index >= len(tasks):
+            self._clear_embedded_mapping_request()
+            return
+
+        task = tasks[task_index]
+        state["payload"] = EinkaufPipeline.apply_mapping_decision(state.get("payload", {}), task, selected_value)
+        self._mapping_state = state
+        self._apply_payload_to_current_scan(state.get("payload", {}))
+        field_key = str(task.get("field", "") or "").strip()
+        binding = self._lookup_bindings.get(field_key)
+        if field_key and binding and field_key in self.inputs:
+            text = str(self.inputs[field_key].text() or "").strip()
+            if text:
+                binding.set_state(FieldState.USER_CONFIRMED)
+                binding.trigger_lookup(text)
+        self._mapping_prompted = True
+        self._advance_to_next_task()
+
+        if self._has_pending_mapping_tasks():
+            self._refresh_mapping_panel_and_ui()
+        else:
+            self.mapping_frame.setVisible(False)
+            self._clear_mapping_panel()
+            self._update_mapping_state_ui()
 
     def _build_dynamic_form(self):
         self.inputs = {}
@@ -524,10 +939,12 @@ class OrderEntryApp(QWidget):
                     except TypeError:
                         pass  # Noch keine Verbindung vorhanden
                     inner.textChanged.connect(lambda _: self._update_save_button_state())
+            self._clear_embedded_mapping_request()
         else:
             # Legacy-QFormLayout fuer Verkauf-Modus
             self._einkauf_form_scroll.setVisible(False)
             self.form_layout_frame.setVisible(True)
+            self._clear_embedded_mapping_request()
 
             # Verkauf: Legacy-Tabelle + externe Buttons anzeigen, EinkaufItemsTableWidget ausblenden
             self.einkauf_items_widget.setVisible(False)
@@ -675,9 +1092,6 @@ class OrderEntryApp(QWidget):
             
         if result_dict:
             try:
-                if self.scan_mode == "einkauf":
-                    result_dict = EinkaufPipeline.normalize_einkauf_result_inline(result_dict)
-                
                 self.current_gemini_data = result_dict
                 self._fill_ui()
             except Exception as e:
@@ -704,12 +1118,13 @@ class OrderEntryApp(QWidget):
         else:
             self._fill_verkauf_ui()
             self._update_summen_banner()
+            self._trigger_post_fill_lookups()
 
         self._update_save_button_state()
-        self._trigger_post_fill_lookups()
 
     def _fill_einkauf_ui(self):
         """Einkauf-Pfad: Kopfdaten + Artikel + Summen-Banner ueber Shared-Phase befuellen."""
+        self._clear_inline_suggestions()
         apply_einkauf_review_workflow(
             self.einkauf_form_widget,
             self.einkauf_items_widget,
@@ -717,14 +1132,10 @@ class OrderEntryApp(QWidget):
             self.current_gemini_data,
             ean_callback=self.ean_service.find_best_local_ean_by_name,
         )
-
-        # Inline-Suggestions fuer unbekannte Felder (statt modale Dialoge)
-        field_suggestions = self.current_gemini_data.get("_field_suggestions", {})
-        if isinstance(field_suggestions, dict):
-            for field_key, suggestions in field_suggestions.items():
-                widget = self.inputs.get(field_key)
-                if widget and hasattr(widget, "set_suggestion_dropdown") and suggestions:
-                    widget.set_suggestion_dropdown(suggestions)
+        self._mapping_state = None
+        self._mapping_done = True
+        self._mapping_prompted = False
+        self._run_mapping_for_current_scan(show_feedback=False, rebuild=True)
 
     def _fill_verkauf_ui(self):
         """Verkauf-Pfad (Legacy): Kopfdaten aus QLineEdits, Artikel aus QTableWidget befuellen."""
@@ -794,62 +1205,63 @@ class OrderEntryApp(QWidget):
             log_exception(__name__, exc)
 
     def _handle_shop_lookup_result(self, result):
-        """Verarbeitet Shop-Lookup-Ergebnis: Logo anzeigen, Dialoge oeffnen."""
+        """Verarbeitet Shop-Lookup-Ergebnis: Logo anzeigen, eingebettetes Mapping oeffnen."""
         # Logo anzeigen wenn gefunden – nutzt set_shop_logo_path damit der Frame sichtbar wird
         if result.has_logo and hasattr(self, "einkauf_form_widget"):
             self.einkauf_form_widget.set_shop_logo_path(result.logo_path)
 
-        # Amazon-Dialog oeffnen wenn noetig
+        # Amazon-Zuordnung rechts einblenden wenn noetig
         if result.source == LookupSource.AMAZON_DIALOG and result.needs_confirm:
-            from module.amazon_country_dialog import AmazonCountryDialog
             raw_name = result.data.get("raw_shop_name", "Amazon")
-            dialog = AmazonCountryDialog(parent=self, raw_value=raw_name)
-            if dialog.exec() == QDialog.DialogCode.Accepted:
-                normalized = dialog.selected_country
-                self.inputs["shop_name"].setText(normalized)
-                # Re-Lookup mit normalisiertem Wert (um Logo zu finden)
-                binding = self._lookup_bindings.get("shop_name")
-                if binding:
-                    binding.trigger_lookup(normalized)
+            self._open_shop_amazon_mapping_panel(raw_name)
+            return
 
-        # Normalization-Dialog oeffnen wenn noetig (kein Amazon, aber unbekannt)
+        # Allgemeine Shop-Zuordnung rechts einblenden wenn noetig
         elif result.source == LookupSource.NORMALIZATION_DIALOG and result.needs_confirm:
-            from module.amazon_country_dialog import SPECIFIC_AMAZON_VALUES
-            from module.normalization_dialog import normalize_value
             raw_name = result.data.get("raw_shop_name", "")
             # Spezifische Amazon-Shops (z.B. "Amazon DE") nicht nochmal normalisieren
             if raw_name and raw_name.lower() not in SPECIFIC_AMAZON_VALUES:
-                normalized = normalize_value("shops", raw_name, parent_widget=self)
-                if normalized and normalized != raw_name:
-                    self.inputs["shop_name"].setText(normalized)
-                    binding = self._lookup_bindings.get("shop_name")
-                    if binding:
-                        binding.set_state(FieldState.USER_CONFIRMED)
-                        binding.trigger_lookup(normalized)
+                self._open_normalization_mapping_panel(
+                    field_key="shop_name",
+                    field_label="Shop-Name",
+                    category="shops",
+                    raw_value=raw_name,
+                )
+                return
 
         # Normalisierten Wert eintragen wenn vorhanden
         elif result.normalized_value and result.found:
             current_text = str(self.inputs.get("shop_name", QLineEdit()).text()).strip()
             if result.normalized_value != current_text:
                 self.inputs["shop_name"].setText(result.normalized_value)
+            self.current_gemini_data["shop_name"] = str(self.inputs["shop_name"].text() or "").strip()
+            if self._active_mapping_context and not self._current_mapping_state():
+                self._clear_embedded_mapping_request()
+        elif self._active_mapping_context and not self._current_mapping_state():
+            self._clear_embedded_mapping_request()
 
     def _handle_zahlungsart_lookup_result(self, result):
         """Verarbeitet Zahlungsart-Lookup-Ergebnis."""
         if result.source == LookupSource.NORMALIZATION_DIALOG and result.needs_confirm:
-            from module.normalization_dialog import normalize_value
             raw_value = result.data.get("raw_zahlungsart", "")
             if raw_value:
-                normalized = normalize_value("zahlungsarten", raw_value, parent_widget=self)
-                if normalized and normalized != raw_value:
-                    self.inputs["zahlungsart"].setText(normalized)
-                    binding = self._lookup_bindings.get("zahlungsart")
-                    if binding:
-                        binding.set_state(FieldState.USER_CONFIRMED)
+                self._open_normalization_mapping_panel(
+                    field_key="zahlungsart",
+                    field_label="Zahlungsart",
+                    category="zahlungsarten",
+                    raw_value=raw_value,
+                )
+                return
 
         elif result.normalized_value and result.found:
             current_text = str(self.inputs.get("zahlungsart", QLineEdit()).text()).strip()
             if result.normalized_value != current_text:
                 self.inputs["zahlungsart"].setText(result.normalized_value)
+            self.current_gemini_data["zahlungsart"] = str(self.inputs["zahlungsart"].text() or "").strip()
+            if self._active_mapping_context and not self._current_mapping_state():
+                self._clear_embedded_mapping_request()
+        elif self._active_mapping_context and not self._current_mapping_state():
+            self._clear_embedded_mapping_request()
 
     def _handle_bestellnummer_lookup_result(self, result):
         """Verarbeitet Bestellnummer-Lookup: OVERWRITE (gelb) wenn schon in DB.
@@ -1186,7 +1598,7 @@ class OrderEntryApp(QWidget):
 
     def _on_waren_table_changed(self, item):
         """Wird bei jeder Aenderung in der Artikel-Tabelle aufgerufen."""
-        self._update_summen_banner()
+        self._refresh_einkauf_live_calculations()
         self._update_save_button_state()
 
     def _update_summen_banner(self):
@@ -1194,7 +1606,7 @@ class OrderEntryApp(QWidget):
         if self.scan_mode != "einkauf":
             self.summen_banner.setVisible(False)
             return
-        refresh_summen_banner(self.summen_banner, self.einkauf_items_widget, self.current_gemini_data)
+        self._refresh_einkauf_live_calculations()
 
     def _update_save_button_state(self):
         """Aktiviert/deaktiviert den Save-Button basierend auf Pflichtfeld-Validierung."""
@@ -1282,6 +1694,7 @@ class OrderEntryApp(QWidget):
         self.logo_search_worker = None
         self.product_image_search_worker = None
         self._pending_image_search_context = None
+        self._clear_embedded_mapping_request()
 
     def _reset_verkauf_state(self):
         """Verkauf-Pfad (Legacy): QLineEdits + QTableWidget leeren."""

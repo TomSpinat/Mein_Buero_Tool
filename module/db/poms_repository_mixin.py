@@ -172,6 +172,8 @@ class PomsRepositoryMixin:
                     w.produkt_name as item,
                     w.menge,
                     COALESCE(w.einstand_brutto, w.ekp_brutto) as ek,
+                    w.einstand_brutto as einstand_brutto_raw,
+                    w.ekp_brutto as ekp_brutto_raw,
                     w.vk_brutto as vk,
                     w.marge_gesamt as win,
                     w.status as inventory_status,
